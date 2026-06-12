@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "incidentes-3d",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8801", "--directory", "incidentes-3d"],
+      "port": 8801
+    }
+  ]
+}

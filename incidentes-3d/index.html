@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UAECOB · Análisis Espacio-Temporal de Incidentes 3D</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+  /* ============ SISTEMA DE DISEÑO GLOBAL ============
+     Mapa base: monocromático B/N. Colores de alerta reservados
+     exclusivamente para datos WebGL y acentos de UI de datos. */
+  :root {
+    --ink: #f2f2f2;
+    --ink-dim: #8a8a8a;
+    --bg-panel: rgba(10, 10, 12, 0.55);
+    --line: rgba(255, 255, 255, 0.14);
+    --c-sinsignos: #b3122e;
+    --c-heridos: #ff6a00;
+    --c-rescatados: #00ffb3;
+    --c-afectados: #ffe000;
+    --c-expuestos: #2979ff;
+    --font: "Inter", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #000; overflow: hidden; font-family: var(--font); }
+  #map { position: absolute; inset: 0; }
+
+  /* ---- Cabecera editorial minimalista ---- */
+  header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+    padding: 22px 28px; pointer-events: none;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  header h1 {
+    color: var(--ink); font-size: 13px; font-weight: 600;
+    letter-spacing: 0.28em; text-transform: uppercase;
+  }
+  header h1 span { color: var(--ink-dim); font-weight: 400; }
+  #phase-indicator {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    color: var(--ink-dim); text-transform: uppercase; text-align: right;
+  }
+
+  /* ---- Timeline (único control visible en Fase 1) ---- */
+  #timeline {
+    position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+    z-index: 10; width: min(680px, 86vw);
+    background: var(--bg-panel); border: 1px solid var(--line);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-radius: 10px; padding: 14px 20px 12px;
+    transition: opacity 0.4s ease;
+  }
+  #timeline .row { display: flex; align-items: center; gap: 14px; }
+  #timeline label {
+    font-family: var(--mono); font-size: 10px; color: var(--ink-dim);
+    letter-spacing: 0.15em; text-transform: uppercase; white-space: nowrap;
+  }
+  #date-readout {
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    min-width: 150px; text-align: right;
+  }
+  #play-btn {
+    background: none; border: 1px solid var(--line); color: var(--ink);
+    width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
+    font-size: 10px; line-height: 1; transition: border-color 0.2s, transform 0.2s;
+  }
+  #play-btn:hover { border-color: var(--ink); transform: scale(1.08); }
+  input[type="range"] {
+    flex: 1; -webkit-appearance: none; appearance: none; height: 2px;
+    background: linear-gradient(90deg, var(--ink) var(--fill, 100%), rgba(255,255,255,0.15) var(--fill, 100%));
+    border-radius: 2px; outline: none; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; border: none;
+    box-shadow: 0 0 0 4px rgba(255,255,255,0.12);
+    transition: box-shadow 0.2s;
+  }
+  input[type="range"]::-webkit-slider-thumb:hover { box-shadow: 0 0 0 7px rgba(255,255,255,0.18); }
+
+  /* ---- Tooltip de hover (lente de contexto) ---- */
+  #tooltip {
+    position: absolute; z-index: 20; pointer-events: none;
+    background: var(--bg-panel); border: 1px solid var(--line);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border-radius: 8px; padding: 10px 14px; max-width: 260px;
+    opacity: 0; transform: translateY(6px); transition: opacity 0.18s ease, transform 0.18s ease;
+    font-size: 11px; color: var(--ink); line-height: 1.5;
+  }
+  #tooltip.visible { opacity: 1; transform: translateY(0); }
+  #tooltip .tt-title { font-weight: 600; font-size: 11px; letter-spacing: 0.06em; }
+  #tooltip .tt-sub { color: var(--ink-dim); font-family: var(--mono); font-size: 9.5px; }
+
+  /* ---- Panel lateral (Fase 3: micro-análisis) ---- */
+  #detail-panel {
+    position: absolute; top: 0; right: 0; bottom: 0; z-index: 15;
+    width: min(380px, 92vw);
+    background: var(--bg-panel); border-left: 1px solid var(--line);
+    backdrop-filter: blur(22px) saturate(1.1); -webkit-backdrop-filter: blur(22px) saturate(1.1);
+    padding: 80px 30px 30px; color: var(--ink); overflow-y: auto;
+    transform: translateX(100%); transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  #detail-panel.open { transform: translateX(0); }
+  #detail-panel h2 { font-size: 15px; font-weight: 600; letter-spacing: 0.04em; margin-bottom: 4px; }
+  #detail-panel .dp-date { font-family: var(--mono); font-size: 10px; color: var(--ink-dim); letter-spacing: 0.12em; margin-bottom: 24px; text-transform: uppercase; }
+  .dp-section { margin-bottom: 22px; }
+  .dp-label { font-family: var(--mono); font-size: 9px; color: var(--ink-dim); letter-spacing: 0.22em; text-transform: uppercase; margin-bottom: 6px; }
+  .dp-value { font-size: 12.5px; line-height: 1.55; }
+  .dp-metric { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.07); }
+  .dp-metric .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 10px; flex: none; }
+  .dp-metric .name { flex: 1; font-size: 11px; letter-spacing: 0.05em; }
+  .dp-metric .count { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+  #close-panel {
+    position: absolute; top: 26px; right: 26px; background: none;
+    border: 1px solid var(--line); color: var(--ink); width: 30px; height: 30px;
+    border-radius: 50%; cursor: pointer; font-size: 13px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  #close-panel:hover { border-color: var(--ink); transform: rotate(90deg); }
+
+  /* ---- Leyenda ---- */
+  #legend {
+    position: absolute; left: 28px; bottom: 28px; z-index: 9;
+    font-family: var(--mono); font-size: 9.5px; color: var(--ink-dim);
+    letter-spacing: 0.1em; line-height: 2; opacity: 0; transition: opacity 0.6s;
+  }
+  #legend.visible { opacity: 1; }
+  #legend .li { display: flex; align-items: center; gap: 8px; }
+  #legend .sw { width: 9px; height: 9px; border-radius: 2px; }
+
+  #loader {
+    position: absolute; inset: 0; z-index: 50; background: #000;
+    display: flex; flex-direction: column; gap: 14px;
+    align-items: center; justify-content: center; color: var(--ink-dim);
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.3em;
+    transition: opacity 0.7s; text-transform: uppercase;
+  }
+  #loader .bar { width: 180px; height: 1px; background: rgba(255,255,255,0.12); overflow: hidden; }
+  #loader .bar i { display: block; height: 100%; width: 30%; background: #fff; animation: scan 1.1s infinite linear; }
+  @keyframes scan { from { transform: translateX(-100%);} to { transform: translateX(600%);} }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<header>
+  <h1>UAECOB <span>/ INCIDENTES 2020 · BOGOTÁ D.C.</span></h1>
+  <div id="phase-indicator">FASE 1 · VISTA MACRO</div>
+</header>
+
+<div id="timeline">
+  <div class="row">
+    <button id="play-btn" title="Reproducir línea de tiempo">▶</button>
+    <label>Timeline</label>
+    <input type="range" id="time-slider" min="0" max="243" value="243" step="1" />
+    <div id="date-readout">—</div>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<div id="legend">
+  <div class="li"><span class="sw" style="background:var(--c-sinsignos)"></span>SIN SIGNOS</div>
+  <div class="li"><span class="sw" style="background:var(--c-heridos)"></span>HERIDOS</div>
+  <div class="li"><span class="sw" style="background:var(--c-rescatados)"></span>RESCATADOS</div>
+  <div class="li"><span class="sw" style="background:var(--c-afectados)"></span>AFECTADOS</div>
+  <div class="li"><span class="sw" style="background:var(--c-expuestos)"></span>EXPUESTOS</div>
+</div>
+
+<div id="detail-panel">
+  <button id="close-panel">✕</button>
+  <h2 id="dp-title">—</h2>
+  <div class="dp-date" id="dp-date">—</div>
+  <div class="dp-section"><div class="dp-label">Ubicación</div><div class="dp-value" id="dp-loc">—</div></div>
+  <div class="dp-section"><div class="dp-label">Servicio / Causa</div><div class="dp-value" id="dp-serv">—</div></div>
+  <div class="dp-section"><div class="dp-label">Respuesta</div><div class="dp-value" id="dp-resp">—</div></div>
+  <div class="dp-section"><div class="dp-label">Categorías de afectación</div><div id="dp-metrics"></div></div>
+</div>
+
+<div id="loader"><div>Procesando 20K registros</div><div class="bar"><i></i></div></div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+/* =====================================================================
+   MAPA INTERACTIVO 3D — INCIDENTES UAECOB
+   Arquitectura: MapLibre GL (basemap monocromático + heatmap macro)
+   + CustomLayer Three.js (InstancedMesh: geometría, halos, partículas).
+   Draw calls del layer 3D: 3 instanced (formas) + 1 instanced (halos)
+   + 1 Points (partículas selección) + 1 mesh (glow EXPUESTOS) ≤ 6.
+   ===================================================================== */
+
+const CONFIG = {
+  center: [-74.085, 4.62],
+  epoch: Date.UTC(2020, 0, 1),            // día 0 del dataset
+  totalDays: 243,                          // 1-ene → 31-ago 2020
+  decayK: 0.025,                           // alpha(t) = max(0.06, exp(-k * Δdías))
+  lensRadiusPx: 160,                       // radio de la lente de contexto (px pantalla)
+  reveal3DZoom: 14.5,                      // zoom a partir del cual el 3D es permanente
+  baseHeight: 55,                          // altura base de extrusión (m)
+};
+
+const COLORS = {
+  SIN_SIGNOS: new THREE.Color(0xb3122e),
+  HERIDOS:    new THREE.Color(0xff6a00),
+  RESCATADOS: new THREE.Color(0x00ffb3),
+  AFECTADOS:  new THREE.Color(0xffe000),
+  EXPUESTOS:  new THREE.Color(0x2979ff),
+  NEUTRO:     new THREE.Color(0xd8d8d8),
+};
+
+const MESES = { enero:0, febrero:1, marzo:2, abril:3, mayo:4, junio:5, julio:6, agosto:7, septiembre:8, octubre:9, noviembre:10, diciembre:11 };
+
+/* ---------------------------------------------------------------
+   1. INGESTA Y NORMALIZACIÓN DE DATOS
+   Las coordenadas del CSV usan punto como separador de millar:
+   "458.675.670.000.008" ≡ 4.58675670000008. Reconstrucción:
+   se eliminan los puntos y se inserta el decimal tras el primer
+   dígito (latitud ~4.x) o tras los dos primeros (longitud ~74.x).
+   --------------------------------------------------------------- */
+function parseLat(raw) {
+  const d = raw.replace(/[^0-9]/g, "");
+  if (d.length < 3) return NaN;
+  return parseFloat(d[0] + "." + d.slice(1));
+}
+function parseLon(raw) {
+  const d = raw.replace(/[^0-9]/g, "");
+  if (d.length < 4) return NaN;
+  return -parseFloat(d.slice(0, 2) + "." + d.slice(2));
+}
+function parseFecha(raw) {
+  // formato: "miércoles 1 de enero de 2020"
+  const m = raw.toLowerCase().match(/(\d{1,2}) de ([a-záéíóúñ]+) de (\d{4})/);
+  if (!m) return null;
+  const mes = MESES[m[2]];
+  if (mes === undefined) return null;
+  return new Date(Date.UTC(+m[3], mes, +m[1]));
+}
+function sumCols(cols, idxs) {
+  let s = 0;
+  for (const i of idxs) { const v = parseInt(cols[i], 10); if (!isNaN(v)) s += v; }
+  return s;
+}
+// Forma según naturaleza del servicio: fuego → pirámide (0),
+// rescate → esfera (1), resto → cilindro (2).
+function shapeFor(servicio, clase) {
+  const s = (servicio + " " + clase).toUpperCase();
+  if (/INCENDIO|QUEMA|FUEGO|EXPLOS|FUGA/.test(s)) return 0;
+  if (/RESCATE/.test(s)) return 1;
+  return 2;
+}
+
+async function loadData() {
+  const res = await fetch("incidentes.csv");
+  const buf = await res.arrayBuffer();
+  // El CSV de datos abiertos viene en latin-1 / windows-1252
+  let text;
+  try { text = new TextDecoder("windows-1252").decode(buf); }
+  catch { text = new TextDecoder("utf-8").decode(buf); }
+  const lines = text.split(/\r?\n/);
+  const H = lines[0].split(";").map(h => h.trim().toUpperCase());
+  const col = name => H.findIndex(h => h.includes(name));
+  const I = {
+    fecha: col("FECHA"), num: col("MERO SERVICIO"), estacion: col("ESTACI"),
+    lat: col("LATITUD"), lon: col("LONGITUD"), barrio: col("BARRIO"),
+    estrato: col("ESTRATO"), upz: col("UPZ"), localidad: col("LOCALIDAD"),
+    hora: col("HORA"), tresp: col("TIEMPO"),
+    servicio: H.findIndex(h => h === "SERVICIO"),
+    clase: col("CLASE DE SERVICIO"), causa: col("CAUSAS"),
+  };
+  const range = (start) => [start, start + 1, start + 2, start + 3];
+  const iExp = H.findIndex(h => h.includes("EXPUESTOS"));
+  const iAfe = H.findIndex(h => h.includes("AFECTADOS"));
+  const iRes = H.findIndex(h => h.includes("RESCATADOS"));
+  const iHer = H.findIndex(h => h.includes("HERIDOS"));
+  const iSin = H.findIndex(h => h.includes("SIN SIGNOS"));
+
+  const incidents = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    const c = lines[i].split(";");
+    if (c.length < 20) continue;
+    const lat = parseLat(c[I.lat] || ""), lon = parseLon(c[I.lon] || "");
+    // Filtro al bounding box de Bogotá D.C.; descarta coordenadas corruptas
+    if (isNaN(lat) || isNaN(lon) || lat < 3.7 || lat > 4.95 || lon < -74.5 || lon > -73.8) continue;
+    const date = parseFecha(c[I.fecha] || "");
+    if (!date) continue;
+    const day = Math.round((date.getTime() - CONFIG.epoch) / 86400000);
+    if (day < 0 || day > CONFIG.totalDays) continue;
+    const estrato = Math.min(6, Math.max(1, parseInt(c[I.estrato], 10) || 3));
+    incidents.push({
+      lat, lon, day, estrato,
+      barrio: c[I.barrio] || "—", upz: c[I.upz] || "—", localidad: c[I.localidad] || "—",
+      estacion: c[I.estacion] || "—", num: c[I.num] || "—",
+      hora: c[I.hora] || "—", tresp: c[I.tresp] || "—",
+      servicio: c[I.servicio] || "—", clase: c[I.clase] || "—", causa: c[I.causa] || "—",
+      fechaTxt: c[I.fecha] || "—",
+      shape: shapeFor(c[I.servicio] || "", c[I.clase] || ""),
+      expuestos: sumCols(c, range(iExp)),
+      afectados: sumCols(c, range(iAfe)),
+      rescatados: sumCols(c, range(iRes)),
+      heridos: sumCols(c, range(iHer)),
+      sinSignos: sumCols(c, range(iSin)),
+    });
+  }
+  return incidents;
+}
+
+// Color dominante: prioridad por gravedad descendente
+function dominantColor(inc) {
+  if (inc.sinSignos > 0) return COLORS.SIN_SIGNOS;
+  if (inc.heridos > 0) return COLORS.HERIDOS;
+  if (inc.rescatados > 0) return COLORS.RESCATADOS;
+  if (inc.afectados > 0) return COLORS.AFECTADOS;
+  if (inc.expuestos > 0) return COLORS.EXPUESTOS;
+  return COLORS.NEUTRO;
+}
+
+/* ---------------------------------------------------------------
+   2. MAPA BASE MONOCROMÁTICO + HEATMAP MACRO (FASE 1)
+   --------------------------------------------------------------- */
+const map = new maplibregl.Map({
+  container: "map",
+  style: "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
+  center: CONFIG.center,
+  zoom: 10.6,
+  pitch: 0,
+  antialias: true,
+  maxPitch: 70,
+});
+
+/* ---------------------------------------------------------------
+   3. CAPA 3D (Three.js custom layer)
+   Posiciones en coordenadas Mercator relativas a un origen común;
+   un solo modelMatrix las lleva al espacio de la cámara de MapLibre.
+   --------------------------------------------------------------- */
+let incidents = [];
+let layer3D = null;
+let selected = -1;
+
+const ORIGIN = maplibregl.MercatorCoordinate.fromLngLat(CONFIG.center, 0);
+const METER = ORIGIN.meterInMercatorCoordinateUnits();
+
+function mercLocal(lon, lat) {
+  const m = maplibregl.MercatorCoordinate.fromLngLat([lon, lat], 0);
+  return [(m.x - ORIGIN.x) / METER, (m.y - ORIGIN.y) / METER];
+}
+
+// ---- Shaders compartidos (extrusiones) ----
+// uniforms de lente: uLens.xy = centro en coords locales (m); uLens.z = radio (m).
+// uReveal ∈ [0,1]: 1 fuerza visibilidad total (zoom alto / selección).
+const VERT_SHAPE = `
+  attribute vec3 iOffset;      // posición local (m)
+  attribute vec3 iColor;
+  attribute float iDay;        // día del incidente desde epoch
+  attribute float iScale;      // escala volumétrica: 1 + log2(1 + afectados totales)
+  attribute float iShape;      // 0 pirámide (fuego) | 1 esfera | 2 cilindro
+  attribute float iSeed;
+  attribute float iPulse;      // frecuencia de pulso (Hz) — HERIDOS
+  uniform float uTime;
+  uniform float uDay;          // día del slider
+  uniform vec3 uLens;
+  uniform float uReveal;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying float vShape;
+  varying float vSeed;
+  varying float vY;
+  varying float vPulse;
+  void main() {
+    vColor = iColor; vShape = iShape; vSeed = iSeed; vPulse = iPulse;
+    vec3 p = position * iScale;
+    vY = clamp(position.y / 30.0, 0.0, 1.0);
+    // Distorsión térmica procedimental: solo pirámides (fuego).
+    // Desplazamiento lateral sinusoidal proporcional a la altura.
+    if (iShape < 0.5) {
+      float w = sin(uTime * 6.0 + p.y * 0.25 + iSeed * 40.0) * 1.6 * vY;
+      p.x += w; p.z += w * 0.6;
+    }
+    vec3 world = p + iOffset;
+    // Decaimiento temporal: alpha = exp(-k·Δdías), suelo 0.06
+    float dt = uDay - iDay;
+    float visible = step(0.0, dt);                       // futuro ⇒ oculto
+    float decay = max(0.06, exp(-${CONFIG.decayK.toFixed(4)} * dt));
+    // Lente de contexto: borde suave de 25% del radio
+    float dLens = distance(world.xz, uLens.xy);
+    float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
+    vAlpha = visible * decay * max(lens, uReveal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
+  }
+`;
+const FRAG_SHAPE = `
+  precision highp float;
+  uniform float uTime;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying float vShape;
+  varying float vSeed;
+  varying float vY;
+  varying float vPulse;
+  // hash procedimental para textura de ruido (sin assets externos)
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  void main() {
+    if (vAlpha < 0.01) discard;
+    vec3 col = vColor;
+    float n = hash(vec2(vSeed * 91.7, vY * 13.3 + floor(uTime * 3.0) * 0.07));
+    if (vShape < 0.5) {
+      // Fuego: gradiente vertical hacia blanco-cálido + parpadeo de ruido
+      col = mix(col * 0.55, mix(col, vec3(1.0, 0.92, 0.6), 0.55), vY);
+      col *= 0.85 + 0.3 * n;
+    } else {
+      col *= 0.7 + 0.45 * vY + 0.12 * n;
+    }
+    // Pulso estroboscópico (HERIDOS): frecuencia ∝ conteo de heridos
+    if (vPulse > 0.0) {
+      float s = 0.5 + 0.5 * sin(uTime * 6.2831 * vPulse);
+      col = mix(col, vec3(1.0), s * s * 0.85);
+    }
+    gl_FragColor = vec4(col, vAlpha);
+  }
+`;
+
+// ---- Halos de estrato ----
+// Radio e intensidad inversamente proporcionales al estrato:
+// f(e) = (7 − e) / 6  ⇒  estrato 1 → 1.0, estrato 6 → 0.167
+const VERT_HALO = `
+  attribute vec3 iOffset;
+  attribute vec3 iColor;
+  attribute float iDay;
+  attribute float iEstrato;
+  uniform float uDay;
+  uniform vec3 uLens;
+  uniform float uReveal;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying vec2 vUv;
+  varying float vIntensity;
+  void main() {
+    vUv = uv * 2.0 - 1.0;
+    float f = (7.0 - iEstrato) / 6.0;
+    vIntensity = f;
+    vColor = iColor;
+    vec3 p = position * (30.0 + 110.0 * f);  // radio del halo en metros
+    vec3 world = p + iOffset; world.y = 0.5;
+    float dt = uDay - iDay;
+    float decay = step(0.0, dt) * max(0.06, exp(-${CONFIG.decayK.toFixed(4)} * dt));
+    float dLens = distance(world.xz, uLens.xy);
+    float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
+    vAlpha = decay * max(lens, uReveal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
+  }
+`;
+const FRAG_HALO = `
+  precision highp float;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying vec2 vUv;
+  varying float vIntensity;
+  void main() {
+    float r = length(vUv);
+    if (r > 1.0 || vAlpha < 0.01) discard;
+    // anillo concéntrico: máximo en r≈0.55, caída radial suave
+    float ring = smoothstep(0.0, 0.55, r) * (1.0 - smoothstep(0.55, 1.0, r));
+    gl_FragColor = vec4(vColor, ring * vAlpha * (0.25 + 0.6 * vIntensity));
+  }
+`;
+
+// ---- Partículas de micro-análisis (Fase 3) ----
+// aMode: 0 humo (SIN SIGNOS) | 1 onda (RESCATADOS) | 2 chispa (AFECTADOS)
+const VERT_PART = `
+  attribute float aMode;
+  attribute vec3 aRand;     // [fase, ángulo, velocidad] normalizados
+  uniform float uTime;
+  uniform vec3 uCenter;
+  uniform float uWave;      // radio máx de onda (m) ∝ rescatados
+  varying float vMode;
+  varying float vFade;
+  varying vec3 vRand;
+  void main() {
+    vMode = aMode; vRand = aRand;
+    vec3 p = uCenter;
+    float t = fract(uTime * 0.18 * (0.5 + aRand.z) + aRand.x); // ciclo de vida [0,1)
+    float ang = aRand.y * 6.2831;
+    if (aMode < 0.5) {
+      // HUMO: ascenso lento; deriva lateral sin(t); columna que se ensancha
+      float h = t * 220.0;
+      float spread = 6.0 + h * 0.14;
+      p += vec3(cos(ang) * spread + sin(uTime + aRand.x * 9.0) * 4.0, h,
+                sin(ang) * spread + cos(uTime * 0.7 + aRand.x * 7.0) * 4.0);
+      vFade = (1.0 - t) * smoothstep(0.0, 0.08, t);
+      gl_PointSize = (10.0 + t * 26.0);
+    } else if (aMode < 1.5) {
+      // ONDA: expansión horizontal concéntrica hasta uWave
+      float r = t * uWave;
+      p += vec3(cos(ang) * r, 1.5 + sin(t * 12.0 + aRand.x * 6.0) * 1.0, sin(ang) * r);
+      vFade = 1.0 - t;
+      gl_PointSize = 7.0;
+    } else {
+      // CHISPA: movimiento browniano (suma de senos inconmesurables)
+      float s = uTime * (1.5 + aRand.z * 2.0) + aRand.x * 50.0;
+      p += vec3(sin(s * 1.7) * 14.0 + sin(s * 0.9 + 2.0) * 8.0,
+                3.0 + abs(sin(s * 1.3)) * 16.0,
+                cos(s * 1.4) * 14.0 + cos(s * 0.8 + 1.0) * 8.0);
+      vFade = 0.6 + 0.4 * sin(s * 5.0);
+      gl_PointSize = 5.0;
+    }
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_PointSize *= 180.0 / max(1.0, -mv.z * 0.05);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const FRAG_PART = `
+  precision highp float;
+  varying float vMode;
+  varying float vFade;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r = length(d) * 2.0;
+    if (r > 1.0) discard;
+    float soft = 1.0 - smoothstep(0.4, 1.0, r);
+    vec3 col;
+    if (vMode < 0.5)      col = vec3(0.45, 0.05, 0.10); // humo carmesí oscuro
+    else if (vMode < 1.5) col = vec3(0.0, 1.0, 0.70);   // onda verde-cian
+    else                  col = vec3(1.0, 0.88, 0.0);   // chispa amarilla
+    gl_FragColor = vec4(col, soft * vFade * 0.85);
+  }
+`;
+
+// ---- Glow EXPUESTOS: disco aditivo, grosor ∝ conteo ----
+const FRAG_GLOW = `
+  precision highp float;
+  uniform float uThick;   // grosor normalizado del contorno ∝ expuestos
+  varying vec2 vUv;
+  void main() {
+    float r = length(vUv * 2.0 - 1.0);
+    if (r > 1.0) discard;
+    // campo estático: banda de contorno [1−uThick, 1] + relleno tenue
+    float edge = smoothstep(1.0 - uThick, 1.0 - uThick * 0.4, r) * (1.0 - smoothstep(0.92, 1.0, r));
+    float fill = (1.0 - r) * 0.12;
+    gl_FragColor = vec4(0.16, 0.47, 1.0, (edge * 0.8 + fill));
+  }
+`;
+
+function buildLayer3D() {
+  const camera = new THREE.Camera();
+  const scene = new THREE.Scene();
+  let renderer = null;
+  const clock = new THREE.Clock();
+
+  const uniforms = {
+    uTime: { value: 0 },
+    uDay: { value: CONFIG.totalDays },
+    uLens: { value: new THREE.Vector3(1e9, 1e9, 0) },
+    uReveal: { value: 0 },
+  };
+
+  // Geometrías primitivas (sin assets externos)
+  const geos = [
+    new THREE.ConeGeometry(11, CONFIG.baseHeight, 4),          // pirámide — fuego
+    new THREE.SphereGeometry(12, 10, 8),                       // esfera — rescate
+    new THREE.CylinderGeometry(9, 9, CONFIG.baseHeight, 8),    // cilindro — otros
+  ];
+  geos[0].translate(0, CONFIG.baseHeight / 2, 0);
+  geos[1].translate(0, 16, 0);
+  geos[2].translate(0, CONFIG.baseHeight / 2, 0);
+
+  const byShape = [[], [], []];
+  incidents.forEach((inc, i) => byShape[inc.shape].push(i));
+  const meshes = [];
+
+  for (let s = 0; s < 3; s++) {
+    const idxs = byShape[s];
+    const n = idxs.length;
+    const geo = new THREE.InstancedBufferGeometry().copy(geos[s]);
+    geo.instanceCount = n;
+    const off = new Float32Array(n * 3), col = new Float32Array(n * 3);
+    const day = new Float32Array(n), scl = new Float32Array(n);
+    const shp = new Float32Array(n), seed = new Float32Array(n), pul = new Float32Array(n);
+    idxs.forEach((gi, k) => {
+      const inc = incidents[gi];
+      const [x, z] = mercLocal(inc.lon, inc.lat);
+      off.set([x, 0, z], k * 3);
+      const c = dominantColor(inc);
+      col.set([c.r, c.g, c.b], k * 3);
+      day[k] = inc.day;
+      const total = inc.expuestos + inc.afectados + inc.rescatados + inc.heridos + inc.sinSignos;
+      // Escala volumétrica logarítmica: evita que outliers dominen la escena
+      scl[k] = 1 + Math.log2(1 + total) * 0.45;
+      shp[k] = s;
+      seed[k] = (gi % 997) / 997;
+      // Frecuencia de pulso (Hz) acotada: 0.8 + 0.4·heridos, máx 4 Hz
+      pul[k] = inc.heridos > 0 ? Math.min(4, 0.8 + inc.heridos * 0.4) : 0;
+      inc._mesh = s; inc._slot = k;
+    });
+    geo.setAttribute("iOffset", new THREE.InstancedBufferAttribute(off, 3));
+    geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
+    geo.setAttribute("iDay", new THREE.InstancedBufferAttribute(day, 1));
+    geo.setAttribute("iScale", new THREE.InstancedBufferAttribute(scl, 1));
+    geo.setAttribute("iShape", new THREE.InstancedBufferAttribute(shp, 1));
+    geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(seed, 1));
+    geo.setAttribute("iPulse", new THREE.InstancedBufferAttribute(pul, 1));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: VERT_SHAPE, fragmentShader: FRAG_SHAPE,
+      uniforms, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+
+  // Halos de estrato (un solo draw call instanciado)
+  {
+    const n = incidents.length;
+    const geo = new THREE.InstancedBufferGeometry().copy(
+      new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2));
+    geo.instanceCount = n;
+    const off = new Float32Array(n * 3), col = new Float32Array(n * 3);
+    const day = new Float32Array(n), est = new Float32Array(n);
+    incidents.forEach((inc, i) => {
+      const [x, z] = mercLocal(inc.lon, inc.lat);
+      off.set([x, 0, z], i * 3);
+      const c = dominantColor(inc);
+      col.set([c.r, c.g, c.b], i * 3);
+      day[i] = inc.day; est[i] = inc.estrato;
+    });
+    geo.setAttribute("iOffset", new THREE.InstancedBufferAttribute(off, 3));
+    geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
+    geo.setAttribute("iDay", new THREE.InstancedBufferAttribute(day, 1));
+    geo.setAttribute("iEstrato", new THREE.InstancedBufferAttribute(est, 1));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: VERT_HALO, fragmentShader: FRAG_HALO,
+      uniforms, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    const halo = new THREE.Mesh(geo, mat);
+    halo.frustumCulled = false;
+    scene.add(halo);
+  }
+
+  // Sistema de partículas de selección (se reconstruye por incidente)
+  let particles = null, glowMesh = null;
+  const partUniforms = {
+    uTime: uniforms.uTime,
+    uCenter: { value: new THREE.Vector3() },
+    uWave: { value: 80 },
+  };
+
+  function clearSelectionFX() {
+    if (particles) { scene.remove(particles); particles.geometry.dispose(); particles = null; }
+    if (glowMesh) { scene.remove(glowMesh); glowMesh.geometry.dispose(); glowMesh.material.dispose(); glowMesh = null; }
+  }
+
+  function spawnSelectionFX(inc) {
+    clearSelectionFX();
+    const [x, z] = mercLocal(inc.lon, inc.lat);
+    partUniforms.uCenter.value.set(x, 0, z);
+    // Volumen/densidad por conteo, con techos de presupuesto
+    const nSmoke = Math.min(900, inc.sinSignos * 140);   // volumen de columna
+    const nWave  = inc.rescatados > 0 ? 260 : 0;
+    const nSpark = Math.min(700, inc.afectados * 90);    // densidad browniana
+    partUniforms.uWave.value = 40 + Math.min(8, inc.rescatados) * 28; // radio máx
+    const n = nSmoke + nWave + nSpark;
+    if (n > 0) {
+      const pos = new Float32Array(n * 3);
+      const mode = new Float32Array(n), rand = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        mode[i] = i < nSmoke ? 0 : i < nSmoke + nWave ? 1 : 2;
+        rand.set([Math.random(), Math.random(), Math.random()], i * 3);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("aMode", new THREE.BufferAttribute(mode, 1));
+      geo.setAttribute("aRand", new THREE.BufferAttribute(rand, 3));
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: VERT_PART, fragmentShader: FRAG_PART,
+        uniforms: partUniforms, transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      particles = new THREE.Points(geo, mat);
+      particles.frustumCulled = false;
+      scene.add(particles);
+    }
+    if (inc.expuestos > 0) {
+      // Grosor del contorno ∝ expuestos, acotado [0.08, 0.5]
+      const thick = Math.min(0.5, 0.08 + inc.expuestos * 0.05);
+      const g = new THREE.PlaneGeometry(160, 160).rotateX(-Math.PI / 2);
+      const m = new THREE.ShaderMaterial({
+        vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+        fragmentShader: FRAG_GLOW,
+        uniforms: { uThick: { value: thick } },
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      glowMesh = new THREE.Mesh(g, m);
+      glowMesh.position.set(x, 1.0, z);
+      scene.add(glowMesh);
+    }
+  }
+
+  return {
+    id: "incidents-3d",
+    type: "custom",
+    renderingMode: "3d",
+    uniforms, spawnSelectionFX, clearSelectionFX,
+    onAdd(mapInst, gl) {
+      renderer = new THREE.WebGLRenderer({ canvas: mapInst.getCanvas(), context: gl, antialias: true });
+      renderer.autoClear = false;
+    },
+    render(gl, matrix) {
+      uniforms.uTime.value = clock.getElapsedTime();
+      // matriz: proyección MapLibre → traslación/escala del origen Mercator
+      const m = new THREE.Matrix4().fromArray(matrix);
+      const l = new THREE.Matrix4()
+        .makeTranslation(ORIGIN.x, ORIGIN.y, 0)
+        .scale(new THREE.Vector3(METER, -METER, METER))
+        .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+      camera.projectionMatrix = m.multiply(l);
+      renderer.resetState();
+      renderer.render(scene, camera);
+      map.triggerRepaint();
+    },
+  };
+}
+
+/* ---------------------------------------------------------------
+   4. INTERACCIÓN: LENTE (hover), SELECCIÓN (click), TIMELINE
+   --------------------------------------------------------------- */
+const tooltip = document.getElementById("tooltip");
+const phaseEl = document.getElementById("phase-indicator");
+const fmtDate = d => new Date(CONFIG.epoch + d * 86400000)
+  .toLocaleDateString("es-CO", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+
+function nearestIncident(lngLat, maxPx) {
+  const p = map.project(lngLat);
+  const dayMax = +document.getElementById("time-slider").value;
+  let best = -1, bestD = maxPx * maxPx;
+  for (let i = 0; i < incidents.length; i++) {
+    if (incidents[i].day > dayMax) continue;
+    const q = map.project([incidents[i].lon, incidents[i].lat]);
+    const dx = q.x - p.x, dy = q.y - p.y, d2 = dx * dx + dy * dy;
+    if (d2 < bestD) { bestD = d2; best = i; }
+  }
+  return best;
+}
+
+function setPhase(txt) { phaseEl.textContent = txt; }
+
+map.on("mousemove", e => {
+  if (!layer3D) return;
+  // Lente: radio en px → metros según resolución actual del mapa
+  // metros/px = 156543.03 · cos(lat) / 2^zoom  (resolución Web Mercator)
+  const mpp = 156543.03392 * Math.cos(e.lngLat.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+  const [x, z] = mercLocal(e.lngLat.lng, e.lngLat.lat);
+  layer3D.uniforms.uLens.value.set(x, z, CONFIG.lensRadiusPx * mpp);
+
+  const i = nearestIncident(e.lngLat, 26);
+  if (i >= 0) {
+    const inc = incidents[i];
+    tooltip.innerHTML =
+      `<div class="tt-title">${inc.servicio}</div>` +
+      `<div class="tt-sub">${inc.barrio} · ESTRATO ${inc.estrato}</div>` +
+      `<div class="tt-sub">${inc.fechaTxt}</div>`;
+    tooltip.style.left = (e.point.x + 16) + "px";
+    tooltip.style.top = (e.point.y - 10) + "px";
+    tooltip.classList.add("visible");
+    map.getCanvas().style.cursor = "pointer";
+    if (selected < 0) setPhase("FASE 2 · LENTE DE CONTEXTO");
+  } else {
+    tooltip.classList.remove("visible");
+    map.getCanvas().style.cursor = "";
+    if (selected < 0) setPhase(map.getZoom() > CONFIG.reveal3DZoom ? "VISTA 3D" : "FASE 1 · VISTA MACRO");
+  }
+});
+
+map.on("click", e => {
+  const i = nearestIncident(e.lngLat, 30);
+  if (i < 0) { closeDetail(); return; }
+  selected = i;
+  const inc = incidents[i];
+  layer3D.spawnSelectionFX(inc);
+  setPhase("FASE 3 · MICRO-ANÁLISIS");
+  // Interpolación de cámara a vista isométrica cercana
+  map.flyTo({
+    center: [inc.lon, inc.lat], zoom: 17.2, pitch: 62, bearing: -28,
+    duration: 2200,
+    easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2, // cubic in-out
+  });
+  // Panel de datos en texto limpio
+  document.getElementById("dp-title").textContent = inc.servicio;
+  document.getElementById("dp-date").textContent = `${inc.fechaTxt} · ${inc.hora}`;
+  document.getElementById("dp-loc").textContent = `${inc.barrio} — UPZ ${inc.upz}, ${inc.localidad} (Estrato ${inc.estrato})`;
+  document.getElementById("dp-serv").textContent = `${inc.clase || "—"} · Causa: ${inc.causa}`;
+  document.getElementById("dp-resp").textContent = `Estación ${inc.estacion} · T. respuesta ${inc.tresp} · Servicio Nº ${inc.num}`;
+  const M = [
+    ["SIN SIGNOS", inc.sinSignos, "var(--c-sinsignos)"],
+    ["HERIDOS", inc.heridos, "var(--c-heridos)"],
+    ["RESCATADOS", inc.rescatados, "var(--c-rescatados)"],
+    ["AFECTADOS", inc.afectados, "var(--c-afectados)"],
+    ["EXPUESTOS", inc.expuestos, "var(--c-expuestos)"],
+  ];
+  document.getElementById("dp-metrics").innerHTML = M.map(([n, v, c]) =>
+    `<div class="dp-metric"><span class="dot" style="background:${c};opacity:${v > 0 ? 1 : 0.18}"></span>` +
+    `<span class="name" style="opacity:${v > 0 ? 1 : 0.35}">${n}</span>` +
+    `<span class="count" style="opacity:${v > 0 ? 1 : 0.25}">${v}</span></div>`).join("");
+  document.getElementById("detail-panel").classList.add("open");
+});
+
+function closeDetail() {
+  if (selected < 0) return;
+  selected = -1;
+  document.getElementById("detail-panel").classList.remove("open");
+  layer3D.clearSelectionFX();
+  map.flyTo({ zoom: 12.5, pitch: 30, bearing: 0, duration: 1600 });
+  setPhase("FASE 1 · VISTA MACRO");
+}
+document.getElementById("close-panel").addEventListener("click", closeDetail);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
+
+// Transición de revelado 3D por zoom: uReveal interpola en [z-1, z+0.5]
+map.on("move", () => {
+  if (!layer3D) return;
+  const z = map.getZoom();
+  const r = Math.min(1, Math.max(0, (z - (CONFIG.reveal3DZoom - 1)) / 1.5));
+  layer3D.uniforms.uReveal.value = selected >= 0 ? 1 : r;
+});
+
+// ---- Timeline ----
+const slider = document.getElementById("time-slider");
+const readout = document.getElementById("date-readout");
+function applyDay() {
+  const d = +slider.value;
+  if (layer3D) layer3D.uniforms.uDay.value = d;
+  readout.textContent = fmtDate(d);
+  slider.style.setProperty("--fill", (d / CONFIG.totalDays * 100) + "%");
+  if (map.getLayer("heat")) map.setFilter("heat", ["<=", ["get", "day"], d]);
+}
+slider.addEventListener("input", applyDay);
+
+let playTimer = null;
+document.getElementById("play-btn").addEventListener("click", function () {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; this.textContent = "▶"; return; }
+  if (+slider.value >= CONFIG.totalDays) slider.value = 0;
+  this.textContent = "❚❚";
+  playTimer = setInterval(() => {
+    slider.value = +slider.value + 1;
+    applyDay();
+    if (+slider.value >= CONFIG.totalDays) { clearInterval(playTimer); playTimer = null; document.getElementById("play-btn").textContent = "▶"; }
+  }, 60);
+});
+
+/* ---------------------------------------------------------------
+   5. ARRANQUE
+   --------------------------------------------------------------- */
+Promise.all([loadData(), new Promise(r => map.on("load", r))]).then(([data]) => {
+  incidents = data;
+
+  // Heatmap macro (Fase 1): puntos de calor abstractos, carmesí sobre B/N
+  map.addSource("pts", {
+    type: "geojson",
+    data: {
+      type: "FeatureCollection",
+      features: incidents.map(d => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [d.lon, d.lat] },
+        properties: { day: d.day },
+      })),
+    },
+  });
+  map.addLayer({
+    id: "heat", type: "heatmap", source: "pts",
+    paint: {
+      "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 9, 4, 14, 18],
+      "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 9, 0.06, 14, 0.3],
+      "heatmap-weight": 0.5,
+      "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
+        0, "rgba(0,0,0,0)",
+        0.25, "rgba(80,8,20,0.45)",
+        0.55, "rgba(179,18,46,0.75)",
+        0.85, "rgba(255,106,0,0.85)",
+        1, "rgba(255,224,0,0.95)"],
+      // El heatmap se desvanece al entrar en rango 3D
+      "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 13, 0.85, CONFIG.reveal3DZoom, 0],
+    },
+  });
+
+  layer3D = buildLayer3D();
+  map.addLayer(layer3D);
+  applyDay();
+
+  document.getElementById("legend").classList.add("visible");
+  const loader = document.getElementById("loader");
+  loader.style.opacity = "0";
+  setTimeout(() => loader.remove(), 800);
+});
+</script>
+</body>
+</html>

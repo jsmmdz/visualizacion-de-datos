@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UAECOB · Escena Cinemática — Incidentes 19 de agosto de 2020</title>
+<style>
+  :root {
+    --ink: #f2f2f2;
+    --ink-dim: #9a9a9a;
+    --mono: "JetBrains Mono", "Consolas", monospace;
+    --font: "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #000; overflow: hidden; font-family: var(--font); }
+  canvas { display: block; }
+
+  /* Panel de datos (superior izquierda) — texto exacto del incidente focal */
+  #data-panel {
+    position: absolute; top: 48px; left: 58px; z-index: 10;
+    background: rgba(8, 8, 10, 0.78); border: 1px solid rgba(255,255,255,0.10);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-radius: 6px; padding: 12px 16px; color: var(--ink);
+    pointer-events: none;
+  }
+  #data-panel .t1 { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }
+  #data-panel .t2 { font-family: var(--mono); font-size: 9.5px; color: var(--ink-dim); letter-spacing: 0.18em; margin-top: 5px; text-transform: uppercase; }
+  #data-panel .t3 { font-family: var(--mono); font-size: 9.5px; color: var(--ink-dim); letter-spacing: 0.10em; margin-top: 3px; }
+
+  /* Etiqueta de categoría (inferior izquierda) */
+  #cat-label {
+    position: absolute; left: 14px; bottom: 14px; z-index: 10;
+    background: #5a0a14; color: #fff; font-family: var(--mono);
+    font-size: 9.5px; letter-spacing: 0.22em; padding: 5px 10px 4px;
+    border-radius: 2px; display: flex; align-items: center; gap: 7px;
+    pointer-events: none;
+  }
+  #cat-label::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #ff2440; box-shadow: 0 0 8px #ff2440; }
+
+  #loader {
+    position: absolute; inset: 0; z-index: 50; background: #000;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-dim); font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.3em; text-transform: uppercase; transition: opacity 1s;
+  }
+</style>
+</head>
+<body>
+<div id="data-panel">
+  <div class="t1">14. PREVENCIONES</div>
+  <div class="t2">PALOQUEMAO · ESTRATO 3</div>
+  <div class="t3">miércoles 19 de agosto de 2020</div>
+</div>
+<div id="cat-label">SIN SIGNOS</div>
+<div id="loader">Generando ciudad procedimental</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+/* =====================================================================
+   ESCENA CINEMÁTICA 3D — INCIDENTES UAECOB (19 AGO 2020)
+   Ciudad isométrica nocturna 100% procedimental (sin assets externos).
+
+   ASIGNACIÓN DE VARIABLES → VISUAL (garantía de mapeo de datos):
+   · Categoría dominante  → color de fuego, base y anillos:
+       SIN SIGNOS → rojo intenso  | HERIDOS → naranja
+       AFECTADOS/EXPUESTOS → amarillo | RESCATADOS → verde (periferia)
+   · Severidad s = Σ(conteos, ponderada 5·sinSignos+3·heridos+…)
+       → tipo de edificio (s alta = bloque de apartamentos, media = oficina,
+         baja = casa con tejado), escala del edificio, nº de partículas de
+         fuego, intensidad de PointLight y radio de las ondas del suelo.
+   · El fuego se adapta a la forma: los emisores se distribuyen
+     uniformemente sobre el rectángulo de la cubierta (w×d) del edificio.
+   ===================================================================== */
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { BokehPass } from "three/addons/postprocessing/BokehPass.js";
+import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+
+const COL = {
+  red:    new THREE.Color(0xff2412),   // SIN SIGNOS
+  orange: new THREE.Color(0xff7a14),   // HERIDOS
+  yellow: new THREE.Color(0xffc824),   // AFECTADOS / EXPUESTOS
+  green:  new THREE.Color(0x35e87a),   // RESCATADOS
+};
+
+/* ---------------- 1. DATOS ----------------
+   Se cargan los incidentes reales del CSV y se toma una muestra del
+   19 de agosto de 2020 (día 231) ± vecinos para poblar la escena.   */
+const MESES = { enero:0, febrero:1, marzo:2, abril:3, mayo:4, junio:5, julio:6, agosto:7 };
+function parseFecha(raw) {
+  const m = raw.toLowerCase().match(/(\d{1,2}) de ([a-záéíóúñ]+) de (\d{4})/);
+  if (!m || MESES[m[2]] === undefined) return null;
+  return Date.UTC(+m[3], MESES[m[2]], +m[1]);
+}
+async function loadIncidents() {
+  const buf = await (await fetch("incidentes.csv")).arrayBuffer();
+  let text; try { text = new TextDecoder("windows-1252").decode(buf); } catch { text = new TextDecoder().decode(buf); }
+  const lines = text.split(/\r?\n/);
+  const H = lines[0].split(";").map(h => h.trim().toUpperCase());
+  const iExp = H.findIndex(h => h.includes("EXPUESTOS"));
+  const iAfe = H.findIndex(h => h.includes("AFECTADOS"));
+  const iRes = H.findIndex(h => h.includes("RESCATADOS"));
+  const iHer = H.findIndex(h => h.includes("HERIDOS"));
+  const iSin = H.findIndex(h => h.includes("SIN SIGNOS"));
+  const iBar = H.indexOf("BARRIO"), iServ = H.indexOf("SERVICIO"), iEst = H.indexOf("ESTRATO");
+  const sum4 = (c, i) => { let s = 0; for (let k = 0; k < 4; k++) s += parseInt(c[i + k], 10) || 0; return s; };
+  const target = Date.UTC(2020, 7, 19);
+  const out = [];
+  // ventana de ±10 días alrededor del 19-ago para densidad de escena
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    const c = lines[i].split(";");
+    if (c.length < 20) continue;
+    const t = parseFecha(c[0] || "");
+    if (t === null || Math.abs(t - target) > 10 * 86400000) continue;
+    out.push({
+      barrio: c[iBar] || "—", servicio: c[iServ] || "—",
+      estrato: parseInt(c[iEst], 10) || 3, fecha: c[0],
+      exp: sum4(c, iExp), afe: sum4(c, iAfe), res: sum4(c, iRes),
+      her: sum4(c, iHer), sin: sum4(c, iSin),
+    });
+  }
+  // Severidad ponderada: prioriza pérdidas humanas
+  for (const d of out) d.sev = d.sin * 5 + d.her * 3 + d.res * 2 + d.afe + d.exp;
+  out.sort((a, b) => b.sev - a.sev);
+  return out;
+}
+function catOf(d) {
+  if (d.sin > 0) return "red";
+  if (d.her > 0) return "orange";
+  if (d.res > 0) return "green";
+  return "yellow";
+}
+
+/* ---------------- 2. ESCENA BASE ---------------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.25));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.4;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05060a);
+scene.fog = new THREE.FogExp2(0x05060a, 0.0007);
+
+const camera = new THREE.PerspectiveCamera(33, innerWidth / innerHeight, 1, 4000);
+// Vista cenital isométrica: elevación ~40°, encuadre amplio de la ciudad
+camera.position.set(520, 480, 600);
+camera.lookAt(0, 0, -40);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, -40);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.46;
+controls.minDistance = 150; controls.maxDistance = 900;
+
+scene.add(new THREE.AmbientLight(0x36405c, 0.95));          // luz ambiental urbana fría
+const moon = new THREE.DirectionalLight(0x6677aa, 0.5);     // luz lunar tenue
+moon.position.set(-200, 400, 150);
+scene.add(moon);
+
+/* ---------------- 3. SUELO: CUADRÍCULA DE CALLES PROCEDIMENTAL ----------------
+   Textura generada en canvas: manzanas gris muy oscuro, calles gris claro,
+   avenidas más anchas cada 4 manzanas, parche de agua azul-negro.        */
+const BLOCK = 64, STREET = 10, CITY_N = 18;                 // 18×18 manzanas
+const CITY_SIZE = CITY_N * (BLOCK + STREET);
+function buildGroundTexture() {
+  const px = 2048, cell = px / CITY_N;
+  const cv = document.createElement("canvas"); cv.width = cv.height = px;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#7c8089"; g.fillRect(0, 0, px, px);        // base = asfalto de calles (gris claro)
+  const sw = cell * STREET / (BLOCK + STREET);
+  for (let i = 0; i < CITY_N; i++) for (let j = 0; j < CITY_N; j++) {
+    const h = (Math.sin(i * 12.9898 + j * 78.233) * 43758.5453) % 1;
+    g.fillStyle = Math.abs(h) > 0.5 ? "#191b20" : "#14161a"; // manzanas oscuras
+    g.fillRect(i * cell + sw / 2, j * cell + sw / 2, cell - sw, cell - sw);
+    // trazado interior de lotes
+    g.strokeStyle = "rgba(120,124,134,0.12)"; g.lineWidth = 1;
+    g.strokeRect(i * cell + sw / 2 + 6, j * cell + sw / 2 + 6, cell - sw - 12, cell - sw - 12);
+  }
+  // avenidas principales más claras
+  g.fillStyle = "#979ba6";
+  for (let i = 4; i < CITY_N; i += 5) {
+    g.fillRect(i * cell - sw * 0.9, 0, sw * 1.8, px);
+    g.fillRect(0, i * cell - sw * 0.9, px, sw * 1.8);
+  }
+  // cuerpo de agua (esquina): azul-negro
+  g.fillStyle = "#0a1422";
+  g.beginPath(); g.ellipse(px * 0.92, px * 0.10, px * 0.16, px * 0.10, 0.5, 0, 7); g.fill();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.anisotropy = 8; tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(CITY_SIZE, CITY_SIZE).rotateX(-Math.PI / 2),
+  new THREE.MeshStandardMaterial({ map: buildGroundTexture(), roughness: 0.95, metalness: 0 })
+);
+scene.add(ground);
+
+/* ---------------- 4. EDIFICIOS PROCEDIMENTALES ----------------
+   Shader de ventanas: rejilla en espacio-objeto sobre caras laterales;
+   encendido pseudoaleatorio por hash(celda, semilla del edificio).    */
+const buildingShader = (burningColor) => new THREE.MeshStandardMaterial({
+  color: 0x3c4049, roughness: 0.85, metalness: 0.05,
+  onBeforeCompile(sh) {
+    sh.uniforms.uSeed = { value: Math.random() * 100 };
+    sh.uniforms.uFire = { value: burningColor ? new THREE.Color(burningColor) : new THREE.Color(0x000000) };
+    sh.uniforms.uTime = { value: 0 };
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vObj; varying vec3 vNrm;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvObj = position; vNrm = normal;");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>
+        varying vec3 vObj; varying vec3 vNrm;
+        uniform float uSeed; uniform vec3 uFire; uniform float uTime;
+        float bhash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)) + uSeed)*43758.5453); }`)
+      .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>
+        // ventanas: solo caras laterales (normal horizontal), grid 3.2×2.6 m
+        if (abs(vNrm.y) < 0.4) {
+          vec2 wc = abs(vNrm.x) > 0.5 ? vObj.zy : vObj.xy;
+          vec2 cellId = floor(wc / vec2(4.4, 3.4));
+          vec2 f = fract(wc / vec2(4.4, 3.4));
+          float win = step(0.30, f.x) * step(f.x, 0.68) * step(0.34, f.y) * step(f.y, 0.74);
+          // pocas ventanas encendidas: ciudad mayormente a oscuras
+          float lit = step(0.86, bhash(cellId));
+          vec3 warm = vec3(1.0, 0.75, 0.45);
+          totalEmissiveRadiance += win * lit * warm * 0.4;
+          // edificios en llamas: solo las plantas altas parpadean con el fuego
+          if (uFire.r + uFire.g + uFire.b > 0.01) {
+            float fl = 0.5 + 0.5 * sin(uTime * 9.0 + bhash(cellId) * 40.0);
+            float upper = smoothstep(0.2, 0.9, vObj.y / 14.0);
+            totalEmissiveRadiance += win * step(0.5, bhash(cellId + 7.0)) * uFire * fl * upper * 1.1;
+          }
+        }`);
+    this.userData.shader = sh;
+  },
+});
+const animatedMats = [];
+
+const houseRoofGeo = new THREE.CylinderGeometry(1, 1, 1, 3, 1);   // prisma triangular
+houseRoofGeo.rotateZ(Math.PI / 2); houseRoofGeo.rotateY(Math.PI / 2);
+
+function makeBuilding(type, w, h, d, burning) {
+  // type: 0 casa (tejado a dos aguas) | 1 oficina | 2 bloque de apartamentos
+  const grp = new THREE.Group();
+  const mat = buildingShader(burning);
+  if (burning) animatedMats.push(mat);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  body.position.y = h / 2;
+  grp.add(body);
+  if (type === 0) {
+    const roof = new THREE.Mesh(houseRoofGeo, new THREE.MeshStandardMaterial({ color: 0x3a3038, roughness: 0.9 }));
+    roof.scale.set(w * 0.62, h * 0.42, d * 0.53);
+    roof.position.y = h + h * 0.2;
+    grp.add(roof);
+  } else if (type === 2) {
+    // patio interior de los bloques de apartamentos (forma de O achatada)
+    const rim = new THREE.Mesh(new THREE.BoxGeometry(w * 0.5, h * 0.25, d * 0.5), mat.clone());
+    rim.position.y = h + h * 0.12;
+    grp.add(rim);
+  }
+  return grp;
+}
+
+/* ---------------- 5. DISTRIBUCIÓN URBANA + INCIDENTES ---------------- */
+const rng = (() => { let s = 1234; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+const cellPos = (i, j) => [ (i - CITY_N / 2 + 0.5) * (BLOCK + STREET), (j - CITY_N / 2 + 0.5) * (BLOCK + STREET) ];
+
+const incidentSites = [];   // { x, z, w, h, d, color(THREE.Color), sev, cat }
+function populate(data) {
+  const used = new Set();
+  // --- edificios en llamas: 34 incidentes con mayor severidad ---
+  const burning = data.slice(0, 34);
+  burning.forEach((d, k) => {
+    const cat = catOf(d);
+    // RESCATADOS (verde) → periferia; severos → centro (anillo según índice)
+    const ringR = cat === "green" ? 7 + rng() * 2 : 1 + (k / burning.length) * 5;
+    let i, j, key, guard = 0;
+    do {
+      const a = rng() * Math.PI * 2;
+      i = Math.round(CITY_N / 2 + Math.cos(a) * ringR);
+      j = Math.round(CITY_N / 2 + Math.sin(a) * ringR);
+      key = i + "_" + j; guard++;
+    } while ((used.has(key) || i < 0 || j < 0 || i >= CITY_N || j >= CITY_N) && guard < 60);
+    used.add(key);
+    const [x, z] = cellPos(i, j);
+    // severidad → tipo y volumen del edificio
+    const s = Math.min(1, d.sev / 12);
+    const type = s > 0.55 ? 2 : s > 0.25 ? 1 : 0;
+    const w = type === 2 ? 38 + s * 14 : type === 1 ? 20 + s * 10 : 12 + s * 5;
+    const h = type === 2 ? 26 + s * 16 : type === 1 ? 18 + s * 14 : 7 + s * 3;
+    const dd = type === 2 ? 30 + s * 12 : type === 1 ? 16 + s * 8 : 10 + s * 4;
+    const color = COL[cat];
+    const b = makeBuilding(type, w, h, dd, color.getHex());
+    b.position.set(x + (rng() - 0.5) * 10, 0, z + (rng() - 0.5) * 10);
+    b.rotation.y = (rng() - 0.5) * 0.3;
+    scene.add(b);
+    incidentSites.push({ x: b.position.x, z: b.position.z, w, h, d: dd, color, sev: s, cat, data: d });
+  });
+  // --- relleno urbano no siniestrado (instanciado en 1 draw call) ---
+  const fillerGeo = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+  const fillerMat = buildingShader(null);
+  const filler = new THREE.InstancedMesh(fillerGeo, fillerMat, CITY_N * CITY_N * 3);
+  const M = new THREE.Matrix4(); let n = 0;
+  for (let i = 0; i < CITY_N; i++) for (let j = 0; j < CITY_N; j++) {
+    if (used.has(i + "_" + j)) continue;
+    const [x, z] = cellPos(i, j);
+    const count = 1 + Math.floor(rng() * 3);
+    for (let k = 0; k < count; k++) {
+      const w = 8 + rng() * 18, h = 4 + Math.pow(rng(), 2.2) * 26, dd = 8 + rng() * 18;
+      M.compose(
+        new THREE.Vector3(x + (rng() - 0.5) * (BLOCK - w), 0, z + (rng() - 0.5) * (BLOCK - dd)),
+        new THREE.Quaternion(),
+        new THREE.Vector3(w, h, dd));
+      filler.setMatrixAt(n++, M);
+    }
+  }
+  filler.count = n;
+  scene.add(filler);
+}
+
+/* ---------------- 6. FUEGO + HUMO (un solo Points cada uno) ----------------
+   Por partícula: aSite(xyz)=centro de cubierta, aSpan(xy)=w×d de la huella,
+   aColor, aRand, aSev. El emisor cubre el rectángulo del techo ⇒ el fuego
+   se adapta procedimentalmente a la forma del edificio.                   */
+const FIRE_VS = `
+  attribute vec3 aSite; attribute vec2 aSpan; attribute vec3 aColor;
+  attribute vec3 aRand; attribute float aSev;
+  uniform float uTime;
+  varying vec3 vColor; varying float vT; varying float vSeed;
+  void main() {
+    vColor = aColor; vSeed = aRand.x;
+    float t = fract(uTime * (0.55 + aRand.z * 0.5) + aRand.x);   // ciclo de vida
+    vT = t;
+    // posición en la cubierta: rejilla aleatoria dentro de w×d, converge al centro al subir
+    vec2 spread = (vec2(aRand.x, aRand.y) - 0.5) * aSpan * (1.0 - t * 0.55);
+    float rise = t * (10.0 + aSev * 30.0);                       // altura de llama ∝ severidad
+    vec3 p = aSite + vec3(spread.x, rise, spread.y);
+    p.x += sin(uTime * 3.0 + aRand.y * 20.0 + t * 7.0) * (1.0 + t * 2.5);
+    p.z += cos(uTime * 2.4 + aRand.x * 17.0 + t * 6.0) * (1.0 + t * 2.0);
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    // tamaño: ancho en la base, afilado arriba; escala global ∝ severidad
+    float s = (1.0 - t) * (1.0 - t) * (7.0 + aSev * 22.0) + 1.5;
+    // tope de tamaño en px: limita el overdraw del blending aditivo
+    gl_PointSize = min(s * 320.0 / -mv.z, 64.0);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const FIRE_FS = `
+  precision highp float;
+  uniform float uTime;
+  varying vec3 vColor; varying float vT; varying float vSeed;
+  float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+  void main() {
+    vec2 q = gl_PointCoord * 2.0 - 1.0;
+    float r = length(q);
+    if (r > 1.0) discard;
+    // máscara de llama: núcleo blando + rotura por ruido animado
+    float n = h2(floor(q * 5.0 + vec2(0.0, uTime * 14.0) + vSeed * 60.0));
+    float mask = smoothstep(1.0, 0.15, r + n * 0.45);
+    // rampa térmica: núcleo blanco-amarillo breve → color de datos dominante → extinción
+    vec3 core = vec3(1.0, 0.93, 0.70);
+    vec3 col = mix(core, vColor, smoothstep(0.0, 0.18, vT));
+    col = mix(col, vColor * 0.2, smoothstep(0.55, 1.0, vT));
+    float a = mask * (1.0 - vT) * 0.85;
+    gl_FragColor = vec4(col * 1.35, a);
+  }
+`;
+const SMOKE_FS = `
+  precision highp float;
+  varying vec3 vColor; varying float vT; varying float vSeed;
+  void main() {
+    vec2 q = gl_PointCoord * 2.0 - 1.0;
+    float r = length(q);
+    if (r > 1.0) discard;
+    float a = smoothstep(1.0, 0.2, r) * sin(vT * 3.1416) * 0.16;
+    gl_FragColor = vec4(mix(vec3(0.07,0.07,0.08), vColor * 0.18, 0.35), a);
+  }
+`;
+const SMOKE_VS = FIRE_VS
+  .replace("float rise = t * (10.0 + aSev * 30.0);", "float rise = 8.0 + aSev * 24.0 + t * (30.0 + aSev * 55.0);")
+  .replace("float s = (1.0 - t) * (1.0 - t) * (7.0 + aSev * 22.0) + 1.5;", "float s = (4.0 + t * 20.0) * (0.4 + aSev * 0.6);");
+
+function buildFire() {
+  let total = 0;
+  const counts = incidentSites.map(s => {
+    const c = Math.floor(40 + s.sev * 220);                 // nº partículas ∝ severidad
+    total += c; return c;
+  });
+  const site = new Float32Array(total * 3), span = new Float32Array(total * 2);
+  const col = new Float32Array(total * 3), rnd = new Float32Array(total * 3);
+  const sev = new Float32Array(total);
+  let p = 0;
+  incidentSites.forEach((s, i) => {
+    for (let k = 0; k < counts[i]; k++, p++) {
+      site.set([s.x, s.h, s.z], p * 3);
+      span.set([s.w * 0.8, s.d * 0.8], p * 2);
+      col.set([s.color.r, s.color.g, s.color.b], p * 3);
+      rnd.set([Math.random(), Math.random(), Math.random()], p * 3);
+      sev[p] = s.sev;
+    }
+  });
+  const mk = (vs, fs, blend) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(total * 3), 3));
+    g.setAttribute("aSite", new THREE.BufferAttribute(site, 3));
+    g.setAttribute("aSpan", new THREE.BufferAttribute(span, 2));
+    g.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+    g.setAttribute("aRand", new THREE.BufferAttribute(rnd, 3));
+    g.setAttribute("aSev", new THREE.BufferAttribute(sev, 1));
+    const m = new THREE.ShaderMaterial({
+      vertexShader: vs, fragmentShader: fs,
+      uniforms: { uTime: uTime },
+      transparent: true, depthWrite: false, blending: blend,
+    });
+    const pts = new THREE.Points(g, m);
+    pts.frustumCulled = false;
+    return pts;
+  };
+  scene.add(mk(FIRE_VS, FIRE_FS, THREE.AdditiveBlending));
+  scene.add(mk(SMOKE_VS, SMOKE_FS, THREE.NormalBlending));
+}
+
+/* ---------------- 7. ONDAS CONCÉNTRICAS DEL SUELO ----------------
+   Plano instanciado por incidente; anillos animados sin(r·N − t)
+   con radio máximo ∝ severidad y color de la categoría.          */
+const RING_VS = `
+  attribute vec3 iPos; attribute vec3 iColor; attribute float iSev;
+  varying vec2 vUv; varying vec3 vColor; varying float vSev;
+  void main() {
+    vUv = uv * 2.0 - 1.0; vColor = iColor; vSev = iSev;
+    vec3 p = position * (26.0 + iSev * 50.0) + iPos;   // radio ∝ severidad
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  }
+`;
+const RING_FS = `
+  precision highp float;
+  uniform float uTime;
+  varying vec2 vUv; varying vec3 vColor; varying float vSev;
+  void main() {
+    float r = length(vUv);
+    if (r > 1.0) discard;
+    // ondas que emanan del centro: 5 anillos viajando hacia afuera
+    float wave = 0.5 + 0.5 * sin(r * 22.0 - uTime * 3.2);
+    wave = pow(wave, 3.0);
+    float glow = pow(1.0 - r, 2.2) * 0.85;              // resplandor central (luz proyectada)
+    float a = (wave * 0.5 + glow) * (1.0 - r) * (0.35 + vSev * 0.65);
+    gl_FragColor = vec4(vColor, a);
+  }
+`;
+function buildRings() {
+  const n = incidentSites.length;
+  const geo = new THREE.InstancedBufferGeometry().copy(
+    new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2));
+  geo.instanceCount = n;
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), sev = new Float32Array(n);
+  incidentSites.forEach((s, i) => {
+    pos.set([s.x, 0.4, s.z], i * 3);
+    col.set([s.color.r, s.color.g, s.color.b], i * 3);
+    sev[i] = s.sev;
+  });
+  geo.setAttribute("iPos", new THREE.InstancedBufferAttribute(pos, 3));
+  geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
+  geo.setAttribute("iSev", new THREE.InstancedBufferAttribute(sev, 1));
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: RING_VS, fragmentShader: RING_FS,
+    uniforms: { uTime: uTime },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.frustumCulled = false;
+  scene.add(m);
+}
+
+/* ---------------- 8. ILUMINACIÓN INDIRECTA ----------------
+   PointLights solo en los 10 incidentes más severos (presupuesto);
+   el resto de "rebote" lo aporta el glow central de los anillos.  */
+const flickerLights = [];
+function buildLights() {
+  incidentSites.slice(0, 6).forEach(s => {
+    const L = new THREE.PointLight(s.color, 0, 150 + s.sev * 120, 1.8);
+    L.position.set(s.x, s.h + 8, s.z);
+    L.userData = { base: 900 + s.sev * 2600, seed: Math.random() * 50 };
+    scene.add(L);
+    flickerLights.push(L);
+  });
+}
+
+/* ---------------- 9. POSTPROCESADO ----------------
+   Bloom (resplandor del fuego) → Bokeh (DoF: foco en el centro,
+   primer plano y fondo difusos) → CA + viñeta + grano sutiles.   */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.75, 0.55, 0.82);
+composer.addPass(bloom);
+const bokeh = new BokehPass(scene, camera, { focus: 900, aperture: 0.00007, maxblur: 0.008 });
+composer.addPass(bokeh);
+const FinalShader = {
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tDiffuse; uniform float uTime;
+    varying vec2 vUv;
+    void main() {
+      vec2 c = vUv - 0.5;
+      float d = length(c);
+      // aberración cromática: desplazamiento radial RGB ∝ d² (solo bordes)
+      float ca = d * d * 0.012;
+      vec3 col;
+      col.r = texture2D(tDiffuse, vUv + c * ca).r;
+      col.g = texture2D(tDiffuse, vUv).g;
+      col.b = texture2D(tDiffuse, vUv - c * ca).b;
+      // viñeta suave
+      col *= 1.0 - smoothstep(0.5, 0.95, d) * 0.4;
+      // grano de película
+      col += (fract(sin(dot(vUv * 731.7 + uTime, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.025;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+};
+const finalPass = new ShaderPass(FinalShader);
+composer.addPass(finalPass);
+composer.addPass(new OutputPass());
+
+/* ---------------- 10. BUCLE ---------------- */
+const uTime = { value: 0 };
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  uTime.value = t;
+  finalPass.uniforms.uTime.value = t;
+  for (const m of animatedMats) if (m.userData.shader) m.userData.shader.uniforms.uTime.value = t;
+  for (const L of flickerLights) {
+    // parpadeo del fuego: suma de senos inconmesurables
+    const f = 0.72 + 0.28 * (Math.sin(t * 9.1 + L.userData.seed) * 0.5 + Math.sin(t * 23.7 + L.userData.seed * 2.0) * 0.3 + 0.5);
+    L.intensity = L.userData.base * f;
+  }
+  controls.update();
+  composer.render();
+}
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// Render bajo demanda (debug/headless: rAF se suspende con la pestaña oculta)
+window.__renderFrame = (t) => {
+  uTime.value = t;
+  finalPass.uniforms.uTime.value = t;
+  for (const m of animatedMats) if (m.userData.shader) m.userData.shader.uniforms.uTime.value = t;
+  for (const L of flickerLights) L.intensity = L.userData.base * 0.85;
+  composer.render();
+};
+
+loadIncidents().then(data => {
+  populate(data);
+  buildFire();
+  buildRings();
+  buildLights();
+  const ld = document.getElementById("loader");
+  ld.style.opacity = "0";
+  setTimeout(() => ld.remove(), 1100);
+  animate();
+});
+</script>
+</body>
+</html>
