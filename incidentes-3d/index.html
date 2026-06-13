@@ -47,7 +47,7 @@
     position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
     z-index: 10; width: min(680px, 86vw);
     background: var(--bg-panel); border: 1px solid var(--line);
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(12px) saturate(150%); -webkit-backdrop-filter: blur(12px) saturate(150%);
     border-radius: 10px; padding: 14px 20px 12px;
     transition: opacity 0.4s ease;
   }
@@ -83,7 +83,7 @@
   #tooltip {
     position: absolute; z-index: 20; pointer-events: none;
     background: var(--bg-panel); border: 1px solid var(--line);
-    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px) saturate(150%); -webkit-backdrop-filter: blur(12px) saturate(150%);
     border-radius: 8px; padding: 10px 14px; max-width: 260px;
     opacity: 0; transform: translateY(6px); transition: opacity 0.18s ease, transform 0.18s ease;
     font-size: 11px; color: var(--ink); line-height: 1.5;
@@ -97,11 +97,13 @@
     position: absolute; top: 0; right: 0; bottom: 0; z-index: 15;
     width: min(380px, 92vw);
     background: var(--bg-panel); border-left: 1px solid var(--line);
-    backdrop-filter: blur(22px) saturate(1.1); -webkit-backdrop-filter: blur(22px) saturate(1.1);
+    backdrop-filter: blur(12px) saturate(150%); -webkit-backdrop-filter: blur(12px) saturate(150%);
     padding: 80px 30px 30px; color: var(--ink); overflow-y: auto;
-    transform: translateX(100%); transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    /* El montaje/desmontaje lo gobierna un muelle físico en JS (translateX/scale),
+       no una transición temporal: por eso aquí NO hay transition de transform. */
+    transform: translateX(100%); opacity: 0; pointer-events: none;
+    will-change: transform, opacity;
   }
-  #detail-panel.open { transform: translateX(0); }
   #detail-panel h2 { font-size: 15px; font-weight: 600; letter-spacing: 0.04em; margin-bottom: 4px; }
   #detail-panel .dp-date { font-family: var(--mono); font-size: 10px; color: var(--ink-dim); letter-spacing: 0.12em; margin-bottom: 24px; text-transform: uppercase; }
   .dp-section { margin-bottom: 22px; }
@@ -143,6 +145,15 @@
 </head>
 <body>
 <div id="map"></div>
+
+<!-- Filtro de MOTION BLUR (anisótropo, dirigido por la velocidad de cámara).
+     stdDeviation se reescribe por frame desde JS; el filtro sólo se engancha al
+     canvas durante el movimiento (en reposo: filter:none ⇒ coste cero). -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="mblur" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
+    <feGaussianBlur id="mblur-gauss" in="SourceGraphic" stdDeviation="0 0" edgeMode="duplicate"/>
+  </filter>
+</svg>
 
 <header>
   <h1>UAECOB <span>/ INCIDENTES 2020 · BOGOTÁ D.C.</span></h1>
@@ -332,7 +343,14 @@ const map = new maplibregl.Map({
   pitch: 0,
   antialias: true,
   maxPitch: 70,
+  // Inercia de cámara: como la cámara es la de MapLibre (no un OrbitControls de
+  // Three), la amortiguación se calibra aquí. linearity↓ ⇒ más inercia;
+  // deceleration↓ ⇒ deslizamiento más largo; easing ease-out cuadrático ⇒ la
+  // parada nunca es mecánica sino una desaceleración suave y exponencial.
+  dragPan: { linearity: 0.2, easing: t => t * (2 - t), maxSpeed: 1400, deceleration: 1800 },
 });
+// Zoom de rueda más orgánico (paso por incremento menor ⇒ desaceleración fina)
+map.scrollZoom.setZoomRate(1 / 130);
 
 /* ---------------------------------------------------------------
    3. CAPA 3D (Three.js custom layer)
@@ -869,13 +887,13 @@ map.on("click", e => {
     `<div class="dp-metric"><span class="dot" style="background:${cc};opacity:${v > 0 ? 1 : 0.18}"></span>` +
     `<span class="name" style="opacity:${v > 0 ? 1 : 0.35}">${n}</span>` +
     `<span class="count" style="opacity:${v > 0 ? 1 : 0.25}">${v}</span></div>`).join("");
-  document.getElementById("detail-panel").classList.add("open");
+  openPanel();   // muelle físico: montaje del panel con desaceleración natural
 });
 
 function closeDetail() {
   if (selected < 0) return;
   selected = -1;
-  document.getElementById("detail-panel").classList.remove("open");
+  closePanel();   // muelle físico: desmontaje del panel
   layer3D.clearSelectionFX();
   // Reversión suave a la perspectiva macro (essential:true por reduced-motion)
   map.flyTo({
@@ -924,6 +942,86 @@ document.getElementById("play-btn").addEventListener("click", function () {
     if (+slider.value >= SLIDER_MAX) { clearInterval(playTimer); playTimer = null; document.getElementById("play-btn").textContent = "▶"; }
   }, 35);
 });
+
+/* ---------------------------------------------------------------
+   4b. CINEMÁTICA: motion-blur por velocidad de cámara + muelles UI
+   --------------------------------------------------------------- */
+// ---- MOTION BLUR dirigido por la velocidad de cámara ----
+// MapLibre posee el framebuffer y compone el basemap; Three.js sólo dibuja los
+// edificios dentro de ese contexto. Un EffectComposer desenfocaría SÓLO la
+// geometría WebGL (no el mapa) y rompería la composición, además de gastar pases
+// de pantalla completa. Ruta elegida (la más ligera y coherente): un filtro SVG
+// anisótropo sobre el canvas COMPLETO, alimentado por la velocidad de cámara en
+// espacio-pantalla. En reposo se desconecta (filter:none ⇒ coste cero); sólo se
+// engancha en paneos/zoom/flyTo rápidos. El blur es direccional: stdDeviation por
+// eje ∝ |velocidad_x|, |velocidad_y| (paneo) + término isótropo (zoom/rot/pitch).
+const mblurGauss = document.getElementById("mblur-gauss");
+let prevCenter = null, prevZoom = null, prevBearing = null, prevPitch = null;
+let blurX = 0, blurY = 0, blurOn = false;
+
+{   // El motion-blur acompaña al flyTo (essential:true): por coherencia, siempre activo.
+  map.on("render", () => {
+    const c = map.getCenter();
+    let px = 0, py = 0;
+    if (prevCenter) {
+      const sp = map.project(prevCenter);     // dónde cae el centro anterior ahora
+      const sc = map.project(c);              // centro actual (≈ centro de pantalla)
+      px = sp.x - sc.x; py = sp.y - sc.y;      // desplazamiento de paneo en píxeles/frame
+    }
+    prevCenter = c;
+    const z = map.getZoom(), b = map.getBearing(), pit = map.getPitch();
+    const dz = prevZoom    != null ? Math.abs(z - prevZoom)     : 0;
+    const db = prevBearing != null ? Math.abs(b - prevBearing)  : 0;
+    const dp = prevPitch   != null ? Math.abs(pit - prevPitch)  : 0;
+    prevZoom = z; prevBearing = b; prevPitch = pit;
+
+    // zoom/rotación/pitch no mueven el punto central ⇒ término isótropo adicional
+    const iso = dz * 26 + db * 0.7 + dp * 0.55;
+    const tx = Math.abs(px) + iso;
+    const ty = Math.abs(py) + iso;
+
+    // subida inmediata al objetivo, caída exponencial (0.80/frame) al detenerse
+    blurX = Math.min(7, Math.max(tx, blurX * 0.80));
+    blurY = Math.min(7, Math.max(ty, blurY * 0.80));
+
+    if (blurX < 0.12 && blurY < 0.12) {
+      if (blurOn) { map.getCanvas().style.filter = ""; blurOn = false; }
+    } else {
+      mblurGauss.setAttribute("stdDeviation", blurX.toFixed(2) + " " + blurY.toFixed(2));
+      if (!blurOn) { map.getCanvas().style.filter = "url(#mblur)"; blurOn = true; }
+    }
+  });
+}
+
+// ---- Muelle físico para el panel de datos (masa·tensión·fricción) ----
+// Sustituye la transición CSS por la integración de un resorte: aceleración
+// = (−k·x − d·v)/m. Levemente subamortiguado ⇒ desaceleración natural con un
+// micro-sobreimpulso "premium". Sólo corre en rAF mientras hay movimiento.
+const panelEl = document.getElementById("detail-panel");
+const spring = {
+  value: 0, target: 0, v: 0, raf: 0, m: 1,
+  k: 205,    // tensión
+  d: 24,     // fricción (crítico≈2√k≈28.6 ⇒ 24 = leve rebote "premium")
+};
+function applyPanel(v) {
+  panelEl.style.transform = `translateX(${(1 - v) * 100}%) scale(${0.985 + 0.015 * v})`;
+  panelEl.style.opacity = Math.max(0, Math.min(1, v * 1.4));
+  panelEl.style.pointerEvents = v > 0.02 ? "auto" : "none";
+}
+function springStep() {
+  const dt = 1 / 60;
+  const a = (-spring.k * (spring.value - spring.target) - spring.d * spring.v) / spring.m;
+  spring.v += a * dt;
+  spring.value += spring.v * dt;
+  if (Math.abs(spring.v) < 0.0015 && Math.abs(spring.value - spring.target) < 0.0015) {
+    spring.value = spring.target; spring.v = 0; applyPanel(spring.value); spring.raf = 0; return;
+  }
+  applyPanel(spring.value);
+  spring.raf = requestAnimationFrame(springStep);
+}
+function openPanel()  { spring.target = 1; if (!spring.raf) spring.raf = requestAnimationFrame(springStep); }
+function closePanel() { spring.target = 0; if (!spring.raf) spring.raf = requestAnimationFrame(springStep); }
+applyPanel(0);   // estado inicial coherente (panel cerrado)
 
 /* ---------------------------------------------------------------
    5. ARRANQUE
