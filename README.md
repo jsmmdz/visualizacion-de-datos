@@ -6,8 +6,7 @@ Visualización espacio-temporal en 3D de los incidentes atendidos por el Cuerpo 
 
 | Vista | Archivo | Descripción |
 |---|---|---|
-| Mapa interactivo | `incidentes-3d/index.html` | MapLibre GL + Three.js. Heatmap macro, lente de contexto 3D al hover, micro-análisis con partículas por categoría de afectación y timeline con decaimiento temporal. |
-| Escena cinemática | `incidentes-3d/cinematic.html` | Ciudad isométrica nocturna 100% procedimental: edificios en llamas, anillos concéntricos, bloom, profundidad de campo y aberración cromática. Datos del 19 de agosto de 2020 ± 10 días. |
+| Mapa interactivo | `incidentes-3d/index.html` | MapLibre GL + Three.js. Heatmap macro, lente de contexto 3D al hover y edificios procedimentales instanciados (cajas con ventanas emisivas) en las coordenadas geográficas de cada caso. Al hacer click se abre la tarjeta de datos y el edificio del incidente se enciende con fuego + humo. Timeline con decaimiento temporal. |
 
 ## Ejecución
 
@@ -18,19 +17,17 @@ python -m http.server 8801 --directory incidentes-3d
 
 Abrir:
 - http://localhost:8801/ (mapa interactivo)
-- http://localhost:8801/cinematic.html (escena cinemática)
 
 Requiere conexión a internet (CDN de MapLibre/Three.js y teselas del mapa base).
 
 ## Codificación visual (mapeo de datos)
 
-- **SIN SIGNOS** → rojo carmesí, columna de humo ascendente (volumen ∝ conteo)
-- **HERIDOS** → naranja, pulso estroboscópico (frecuencia ∝ conteo)
-- **RESCATADOS** → verde-cian, ondas concéntricas en expansión (radio ∝ conteo)
-- **AFECTADOS** → amarillo, chispas con movimiento browniano (densidad ∝ conteo)
-- **EXPUESTOS** → azul eléctrico, contorno glow estático (grosor ∝ conteo)
+- **Categoría dominante** (prioridad SIN SIGNOS → HERIDOS → RESCATADOS → AFECTADOS → EXPUESTOS) → color del edificio y del fuego: rojo carmesí, naranja, verde-cian, amarillo, azul eléctrico
+- **Severidad** ponderada `5·sinSignos + 3·heridos + 2·rescatados + afectados + expuestos` → volumen y altura del edificio + nº de partículas de fuego/humo
+- **Víctimas** (sin signos / heridos) → ventanas de las plantas altas en llamas (parpadeo procedimental)
+- **EXPUESTOS** → disco glow aditivo en la base del caso seleccionado (grosor ∝ conteo)
 - **Estrato** → halo en la base, radio/intensidad inversamente proporcionales `(7−e)/6`
 - **Fecha** → opacidad con decaimiento exponencial `exp(−0.025·Δdías)` controlada por timeline
-- **Servicio/Causa** → forma primitiva: pirámide (fuego), esfera (rescate), cilindro (otros)
+- **Fuego + humo** → emisores sobre la cubierta (w×d) del edificio seleccionado; la llama se adapta a la huella del edificio
 
-Sin assets 3D externos: toda la volumetría es procedimental (primitivas + shaders GLSL).
+Sin assets 3D externos: toda la volumetría es procedimental (cajas + shaders GLSL) e instanciada (un solo draw call para los ~16K edificios).

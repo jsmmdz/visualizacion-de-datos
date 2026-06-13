@@ -199,6 +199,10 @@ const CONFIG = {
   lensRadiusPx: 160,                       // radio de la lente de contexto (px pantalla)
   reveal3DZoom: 14.5,                      // zoom a partir del cual el 3D es permanente
   baseHeight: 55,                          // altura base de extrusión (m)
+  timeScale: 5,                            // subdivisiones del slider por día: timeline más largo
+                                           // ⇒ los incidentes se despliegan con más separación
+  haloStrobe: 1.0,                         // días de la fase de titileo estroboscópico (sirena)
+  haloFade: 2.6,                           // días de la fase de desvanecimiento exponencial
 };
 
 const COLORS = {
@@ -347,42 +351,41 @@ function mercLocal(lon, lat) {
   return [(m.x - ORIGIN.x) / METER, (m.y - ORIGIN.y) / METER];
 }
 
-// ---- Shaders compartidos (extrusiones) ----
-// uniforms de lente: uLens.xy = centro en coords locales (m); uLens.z = radio (m).
-// uReveal ∈ [0,1]: 1 fuerza visibilidad total (zoom alto / selección).
-const VERT_SHAPE = `
-  attribute vec3 iOffset;      // posición local (m)
-  attribute vec3 iColor;
+// ---- Shaders de EDIFICIOS (cajas con ventanas emisivas) ----
+// Migrados de la escena cinemática y adaptados al custom layer de MapLibre:
+// como aquí no hay luces ni postproceso, el material de ventanas se reimplementa
+// en un ShaderMaterial propio que sí respeta la línea de tiempo (uDay), la lente
+// de contexto (uLens) y el revelado por zoom/selección (uReveal).
+//   iDim  = ancho·alto·profundidad (m) de cada edificio (∝ severidad)
+//   iBurn = 0..1 intensidad de incendio (víctimas) ⇒ ventanas altas en llamas
+const VERT_BUILDING = `
+  attribute vec3 iOffset;      // base del edificio en coords locales (m)
+  attribute vec3 iColor;       // color de la categoría dominante
   attribute float iDay;        // día del incidente desde epoch
-  attribute float iScale;      // escala volumétrica: 1 + log2(1 + afectados totales)
-  attribute float iShape;      // 0 pirámide (fuego) | 1 esfera | 2 cilindro
+  attribute vec3 iDim;         // ancho, alto, profundidad (m)
   attribute float iSeed;
-  attribute float iPulse;      // frecuencia de pulso (Hz) — HERIDOS
+  attribute float iBurn;       // 0..1 intensidad de incendio
   uniform float uTime;
-  uniform float uDay;          // día del slider
+  uniform float uDay;
   uniform vec3 uLens;
   uniform float uReveal;
   varying vec3 vColor;
   varying float vAlpha;
-  varying float vShape;
+  varying vec3 vObj;
+  varying vec3 vNrm;
   varying float vSeed;
-  varying float vY;
-  varying float vPulse;
+  varying float vBurn;
+  varying float vH;
   void main() {
-    vColor = iColor; vShape = iShape; vSeed = iSeed; vPulse = iPulse;
-    vec3 p = position * iScale;
-    vY = clamp(position.y / 30.0, 0.0, 1.0);
-    // Distorsión térmica procedimental: solo pirámides (fuego).
-    // Desplazamiento lateral sinusoidal proporcional a la altura.
-    if (iShape < 0.5) {
-      float w = sin(uTime * 6.0 + p.y * 0.25 + iSeed * 40.0) * 1.6 * vY;
-      p.x += w; p.z += w * 0.6;
-    }
+    vColor = iColor; vSeed = iSeed; vBurn = iBurn; vNrm = normal; vH = iDim.y;
+    vec3 p = position * iDim;          // caja unidad (base en y=0) → volumen w×h×d
+    vObj = p;
     vec3 world = p + iOffset;
-    // Decaimiento temporal: alpha = exp(-k·Δdías), suelo 0.06
+    // Decaimiento temporal: alpha = exp(-k·Δdías); suelo alto (0.85) ⇒ edificios sólidos,
+    // no fantasmales, conservando un leve gradiente de antigüedad
     float dt = uDay - iDay;
     float visible = step(0.0, dt);                       // futuro ⇒ oculto
-    float decay = max(0.06, exp(-${CONFIG.decayK.toFixed(4)} * dt));
+    float decay = max(0.85, exp(-${CONFIG.decayK.toFixed(4)} * dt));
     // Lente de contexto: borde suave de 25% del radio
     float dLens = distance(world.xz, uLens.xy);
     float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
@@ -390,34 +393,47 @@ const VERT_SHAPE = `
     gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
 `;
-const FRAG_SHAPE = `
+const FRAG_BUILDING = `
   precision highp float;
   uniform float uTime;
   varying vec3 vColor;
   varying float vAlpha;
-  varying float vShape;
+  varying vec3 vObj;
+  varying vec3 vNrm;
   varying float vSeed;
-  varying float vY;
-  varying float vPulse;
-  // hash procedimental para textura de ruido (sin assets externos)
-  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  varying float vBurn;
+  varying float vH;
+  float bhash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)) + vSeed * 57.0) * 43758.5453); }
   void main() {
     if (vAlpha < 0.01) discard;
-    vec3 col = vColor;
-    float n = hash(vec2(vSeed * 91.7, vY * 13.3 + floor(uTime * 3.0) * 0.07));
-    if (vShape < 0.5) {
-      // Fuego: gradiente vertical hacia blanco-cálido + parpadeo de ruido
-      col = mix(col * 0.55, mix(col, vec3(1.0, 0.92, 0.6), 0.55), vY);
-      col *= 0.85 + 0.3 * n;
-    } else {
-      col *= 0.7 + 0.45 * vY + 0.12 * n;
+    // Cuerpo: hormigón oscuro, levemente tintado por la categoría
+    vec3 col = vec3(0.045, 0.05, 0.06) + vColor * 0.05;
+    if (vNrm.y > 0.5) col += vColor * 0.05 + 0.015;      // cubierta algo más clara
+    // Ventanas: rejilla 4.4×3.4 m sobre caras laterales (normal horizontal)
+    if (abs(vNrm.y) < 0.5) {
+      vec2 wc = abs(vNrm.x) > 0.5 ? vObj.zy : vObj.xy;
+      vec2 cell = floor(wc / vec2(4.4, 3.4));
+      vec2 f = fract(wc / vec2(4.4, 3.4));
+      float win = step(0.30, f.x) * step(f.x, 0.68) * step(0.34, f.y) * step(f.y, 0.74);
+      // Ventanas vivas: cada celda titila y algunas se encienden/apagan en el tiempo,
+      // con ritmo y fase propios (por edificio y por ventana) ⇒ toda la ciudad animada.
+      float hc = bhash(cell);
+      float litBase = step(0.80, hc);                                     // ~20% siempre encendidas
+      float band = step(0.58, hc) * (1.0 - step(0.80, hc));               // franja intermedia que titila
+      float cycle = step(0.0, sin(uTime * (0.5 + hc * 1.5) + hc * 50.0)); // encendido/apagado lento
+      float lit = max(litBase, band * cycle);
+      float twinkle = 0.65 + 0.35 * sin(uTime * (2.5 + hc * 4.0) + hc * 25.0); // parpadeo de brillo
+      col += win * lit * vec3(1.0, 0.78, 0.45) * 0.6 * twinkle;           // luz cálida interior animada
+      // Edificio en llamas (víctimas): plantas altas parpadean con el color de datos
+      if (vBurn > 0.01) {
+        float fl = 0.5 + 0.5 * sin(uTime * 9.0 + bhash(cell) * 40.0);
+        float upper = smoothstep(0.2, 0.9, vObj.y / max(vH, 1.0));
+        col += win * step(0.5, bhash(cell + 7.0)) * vColor * fl * upper * vBurn * 1.3;
+      }
     }
-    // Pulso estroboscópico (HERIDOS): frecuencia ∝ conteo de heridos
-    if (vPulse > 0.0) {
-      float s = 0.5 + 0.5 * sin(uTime * 6.2831 * vPulse);
-      col = mix(col, vec3(1.0), s * s * 0.85);
-    }
-    gl_FragColor = vec4(col, vAlpha);
+    // Edificios 100% sólidos: el alpha (vAlpha) solo decide el descarte (futuro / fuera
+    // de lente); el fragmento visible se emite totalmente opaco, sin translucidez.
+    gl_FragColor = vec4(col, 1.0);
   }
 `;
 
@@ -429,6 +445,8 @@ const VERT_HALO = `
   attribute vec3 iColor;
   attribute float iDay;
   attribute float iEstrato;
+  attribute float iSeed;
+  uniform float uTime;
   uniform float uDay;
   uniform vec3 uLens;
   uniform float uReveal;
@@ -443,11 +461,22 @@ const VERT_HALO = `
     vColor = iColor;
     vec3 p = position * (30.0 + 110.0 * f);  // radio del halo en metros
     vec3 world = p + iOffset; world.y = 0.5;
+    // Secuencia temporal por incidente — dt = días desde su aparición (según el slider):
+    //   Fase 1 (0 .. T1): TITILEO ESTROBOSCÓPICO tipo sirena de bomberos (rápido, en tiempo real)
+    //   Fase 2 (T1 .. T1+T2): DESVANECIMIENTO exponencial rápido y suave hacia opacidad 0
     float dt = uDay - iDay;
-    float decay = step(0.0, dt) * max(0.06, exp(-${CONFIG.decayK.toFixed(4)} * dt));
+    float T1 = ${CONFIG.haloStrobe.toFixed(2)};
+    float T2 = ${CONFIG.haloFade.toFixed(2)};
+    float strobe = mix(0.12, 1.0, step(0.0, sin(uTime * 44.0 + iSeed * 39.0)));  // ~7 Hz on/off
+    float env = 0.0;
+    if (dt >= 0.0 && dt < T1) {
+      env = strobe;                                          // Fase 1: titileo
+    } else if (dt >= T1 && dt <= T1 + T2) {
+      env = exp(-4.0 * (dt - T1) / T2);                      // Fase 2: fade exponencial → ~0
+    }
     float dLens = distance(world.xz, uLens.xy);
     float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
-    vAlpha = decay * max(lens, uReveal);
+    vAlpha = env * max(lens, uReveal);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
 `;
@@ -462,70 +491,70 @@ const FRAG_HALO = `
     if (r > 1.0 || vAlpha < 0.01) discard;
     // anillo concéntrico: máximo en r≈0.55, caída radial suave
     float ring = smoothstep(0.0, 0.55, r) * (1.0 - smoothstep(0.55, 1.0, r));
-    gl_FragColor = vec4(vColor, ring * vAlpha * (0.25 + 0.6 * vIntensity));
+    gl_FragColor = vec4(vColor, ring * vAlpha * (0.35 + 0.7 * vIntensity));
   }
 `;
 
-// ---- Partículas de micro-análisis (Fase 3) ----
-// aMode: 0 humo (SIN SIGNOS) | 1 onda (RESCATADOS) | 2 chispa (AFECTADOS)
-const VERT_PART = `
-  attribute float aMode;
-  attribute vec3 aRand;     // [fase, ángulo, velocidad] normalizados
+// ---- Fuego + humo del incidente seleccionado (migrado de la escena cinemática) ----
+// Por partícula: aSite = centro de la cubierta, aSpan = w×d de la huella,
+// aColor = categoría dominante, aRand = aleatorios, aSev = severidad normalizada.
+// El emisor cubre el rectángulo del techo ⇒ el fuego se adapta a la forma del edificio.
+const FIRE_VS = `
+  attribute vec3 aSite; attribute vec2 aSpan; attribute vec3 aColor;
+  attribute vec3 aRand; attribute float aSev;
   uniform float uTime;
-  uniform vec3 uCenter;
-  uniform float uWave;      // radio máx de onda (m) ∝ rescatados
-  varying float vMode;
-  varying float vFade;
-  varying vec3 vRand;
+  varying vec3 vColor; varying float vT; varying float vSeed;
   void main() {
-    vMode = aMode; vRand = aRand;
-    vec3 p = uCenter;
-    float t = fract(uTime * 0.18 * (0.5 + aRand.z) + aRand.x); // ciclo de vida [0,1)
-    float ang = aRand.y * 6.2831;
-    if (aMode < 0.5) {
-      // HUMO: ascenso lento; deriva lateral sin(t); columna que se ensancha
-      float h = t * 220.0;
-      float spread = 6.0 + h * 0.14;
-      p += vec3(cos(ang) * spread + sin(uTime + aRand.x * 9.0) * 4.0, h,
-                sin(ang) * spread + cos(uTime * 0.7 + aRand.x * 7.0) * 4.0);
-      vFade = (1.0 - t) * smoothstep(0.0, 0.08, t);
-      gl_PointSize = (10.0 + t * 26.0);
-    } else if (aMode < 1.5) {
-      // ONDA: expansión horizontal concéntrica hasta uWave
-      float r = t * uWave;
-      p += vec3(cos(ang) * r, 1.5 + sin(t * 12.0 + aRand.x * 6.0) * 1.0, sin(ang) * r);
-      vFade = 1.0 - t;
-      gl_PointSize = 7.0;
-    } else {
-      // CHISPA: movimiento browniano (suma de senos inconmesurables)
-      float s = uTime * (1.5 + aRand.z * 2.0) + aRand.x * 50.0;
-      p += vec3(sin(s * 1.7) * 14.0 + sin(s * 0.9 + 2.0) * 8.0,
-                3.0 + abs(sin(s * 1.3)) * 16.0,
-                cos(s * 1.4) * 14.0 + cos(s * 0.8 + 1.0) * 8.0);
-      vFade = 0.6 + 0.4 * sin(s * 5.0);
-      gl_PointSize = 5.0;
-    }
+    vColor = aColor; vSeed = aRand.x;
+    float t = fract(uTime * (0.55 + aRand.z * 0.5) + aRand.x);   // ciclo de vida
+    vT = t;
+    // rejilla aleatoria dentro de w×d que converge al centro al subir
+    vec2 spread = (vec2(aRand.x, aRand.y) - 0.5) * aSpan * (1.0 - t * 0.55);
+    float rise = t * (16.0 + aSev * 46.0);                       // llama más alta y voraz
+    vec3 p = aSite + vec3(spread.x, rise, spread.y);
+    p.x += sin(uTime * 3.0 + aRand.y * 20.0 + t * 7.0) * (1.0 + t * 2.5);
+    p.z += cos(uTime * 2.4 + aRand.x * 17.0 + t * 6.0) * (1.0 + t * 2.0);
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
-    gl_PointSize *= 180.0 / max(1.0, -mv.z * 0.05);
+    float s = (1.0 - t) * (1.0 - t) * (13.0 + aSev * 40.0) + 2.5; // llamas más grandes
+    gl_PointSize = min(s * 360.0 / -mv.z, 120.0);                // tope de px mayor
     gl_Position = projectionMatrix * mv;
   }
 `;
-const FRAG_PART = `
+const FIRE_FS = `
   precision highp float;
-  varying float vMode;
-  varying float vFade;
+  uniform float uTime;
+  varying vec3 vColor; varying float vT; varying float vSeed;
+  float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
   void main() {
-    vec2 d = gl_PointCoord - 0.5;
-    float r = length(d) * 2.0;
+    vec2 q = gl_PointCoord * 2.0 - 1.0;
+    float r = length(q);
     if (r > 1.0) discard;
-    float soft = 1.0 - smoothstep(0.4, 1.0, r);
-    vec3 col;
-    if (vMode < 0.5)      col = vec3(0.45, 0.05, 0.10); // humo carmesí oscuro
-    else if (vMode < 1.5) col = vec3(0.0, 1.0, 0.70);   // onda verde-cian
-    else                  col = vec3(1.0, 0.88, 0.0);   // chispa amarilla
-    gl_FragColor = vec4(col, soft * vFade * 0.85);
+    // máscara de llama: núcleo blando + rotura por ruido animado
+    float n = h2(floor(q * 5.0 + vec2(0.0, uTime * 14.0) + vSeed * 60.0));
+    float mask = smoothstep(1.0, 0.15, r + n * 0.45);
+    // rampa térmica: núcleo blanco-cálido → color de datos → extinción
+    vec3 core = vec3(1.0, 0.95, 0.75);
+    vec3 col = mix(core, vColor, smoothstep(0.0, 0.18, vT));
+    col = mix(col, vColor * 0.2, smoothstep(0.55, 1.0, vT));
+    float a = mask * (1.0 - vT);                                 // más opaco y luminoso
+    gl_FragColor = vec4(col * 2.0, a);                           // emisión potenciada (incendio voraz)
   }
 `;
+const SMOKE_FS = `
+  precision highp float;
+  varying vec3 vColor; varying float vT; varying float vSeed;
+  void main() {
+    vec2 q = gl_PointCoord * 2.0 - 1.0;
+    float r = length(q);
+    if (r > 1.0) discard;
+    float a = smoothstep(1.0, 0.2, r) * sin(vT * 3.1416) * 0.42; // humo más denso y amenazante
+    gl_FragColor = vec4(mix(vec3(0.06,0.06,0.07), vColor * 0.16, 0.3), a);
+  }
+`;
+// El humo reutiliza el VS del fuego, con columna más alta y grano más ancho
+const SMOKE_VS = FIRE_VS
+  .replace("float rise = t * (16.0 + aSev * 46.0);", "float rise = 12.0 + aSev * 30.0 + t * (60.0 + aSev * 90.0);")
+  .replace("float s = (1.0 - t) * (1.0 - t) * (13.0 + aSev * 40.0) + 2.5;", "float s = (10.0 + t * 42.0) * (0.5 + aSev * 0.7);");
 
 // ---- Glow EXPUESTOS: disco aditivo, grosor ∝ conteo ----
 const FRAG_GLOW = `
@@ -555,59 +584,50 @@ function buildLayer3D() {
     uReveal: { value: 0 },
   };
 
-  // Geometrías primitivas (sin assets externos)
-  const geos = [
-    new THREE.ConeGeometry(11, CONFIG.baseHeight, 4),          // pirámide — fuego
-    new THREE.SphereGeometry(12, 10, 8),                       // esfera — rescate
-    new THREE.CylinderGeometry(9, 9, CONFIG.baseHeight, 8),    // cilindro — otros
-  ];
-  geos[0].translate(0, CONFIG.baseHeight / 2, 0);
-  geos[1].translate(0, 16, 0);
-  geos[2].translate(0, CONFIG.baseHeight / 2, 0);
-
-  const byShape = [[], [], []];
-  incidents.forEach((inc, i) => byShape[inc.shape].push(i));
-  const meshes = [];
-
-  for (let s = 0; s < 3; s++) {
-    const idxs = byShape[s];
-    const n = idxs.length;
-    const geo = new THREE.InstancedBufferGeometry().copy(geos[s]);
+  // Edificios instanciados (un solo draw call): caja unidad con base en y=0.
+  // Las dimensiones y el nº de ventanas/fuego derivan de la severidad del incidente,
+  // con la misma fórmula ponderada que usaba la escena cinemática.
+  {
+    const n = incidents.length;
+    const geo = new THREE.InstancedBufferGeometry().copy(
+      new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0));
     geo.instanceCount = n;
     const off = new Float32Array(n * 3), col = new Float32Array(n * 3);
-    const day = new Float32Array(n), scl = new Float32Array(n);
-    const shp = new Float32Array(n), seed = new Float32Array(n), pul = new Float32Array(n);
-    idxs.forEach((gi, k) => {
-      const inc = incidents[gi];
+    const day = new Float32Array(n), dim = new Float32Array(n * 3);
+    const seed = new Float32Array(n), burn = new Float32Array(n);
+    incidents.forEach((inc, i) => {
       const [x, z] = mercLocal(inc.lon, inc.lat);
-      off.set([x, 0, z], k * 3);
+      off.set([x, 0, z], i * 3);
       const c = dominantColor(inc);
-      col.set([c.r, c.g, c.b], k * 3);
-      day[k] = inc.day;
-      const total = inc.expuestos + inc.afectados + inc.rescatados + inc.heridos + inc.sinSignos;
-      // Escala volumétrica logarítmica: evita que outliers dominen la escena
-      scl[k] = 1 + Math.log2(1 + total) * 0.45;
-      shp[k] = s;
-      seed[k] = (gi % 997) / 997;
-      // Frecuencia de pulso (Hz) acotada: 0.8 + 0.4·heridos, máx 4 Hz
-      pul[k] = inc.heridos > 0 ? Math.min(4, 0.8 + inc.heridos * 0.4) : 0;
-      inc._mesh = s; inc._slot = k;
+      col.set([c.r, c.g, c.b], i * 3);
+      day[i] = inc.day;
+      // Severidad ponderada (prioriza pérdidas humanas) → volumen y altura del edificio
+      const sev = inc.sinSignos * 5 + inc.heridos * 3 + inc.rescatados * 2 + inc.afectados + inc.expuestos;
+      const sevN = Math.min(1, sev / 12);
+      const r1 = (i % 997) / 997, r2 = ((i * 7) % 991) / 991;   // jitter determinista
+      const S = 1.5;                                             // escala global: mayor presencia
+      const w = (8 + sevN * 13 + r1 * 4) * S;                    // huella
+      const d = (8 + sevN * 13 + r2 * 4) * S;
+      const h = (11 + sevN * 46) * (0.7 + 0.6 * r1) * S;         // altura ∝ severidad + variación
+      dim.set([w, h, d], i * 3);
+      seed[i] = r1;
+      // intensidad de incendio: los edificios con víctimas arden en sus ventanas altas
+      burn[i] = Math.min(1, (inc.sinSignos * 1.0 + inc.heridos * 0.6 + inc.rescatados * 0.3) / 3);
+      inc._w = w; inc._h = h; inc._d = d; inc._sevN = sevN; inc._x = x; inc._z = z;
     });
     geo.setAttribute("iOffset", new THREE.InstancedBufferAttribute(off, 3));
     geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
     geo.setAttribute("iDay", new THREE.InstancedBufferAttribute(day, 1));
-    geo.setAttribute("iScale", new THREE.InstancedBufferAttribute(scl, 1));
-    geo.setAttribute("iShape", new THREE.InstancedBufferAttribute(shp, 1));
+    geo.setAttribute("iDim", new THREE.InstancedBufferAttribute(dim, 3));
     geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(seed, 1));
-    geo.setAttribute("iPulse", new THREE.InstancedBufferAttribute(pul, 1));
+    geo.setAttribute("iBurn", new THREE.InstancedBufferAttribute(burn, 1));
     const mat = new THREE.ShaderMaterial({
-      vertexShader: VERT_SHAPE, fragmentShader: FRAG_SHAPE,
-      uniforms, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      vertexShader: VERT_BUILDING, fragmentShader: FRAG_BUILDING,
+      uniforms, transparent: false, depthWrite: true, side: THREE.FrontSide,
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.frustumCulled = false;
-    scene.add(mesh);
-    meshes.push(mesh);
+    const buildings = new THREE.Mesh(geo, mat);
+    buildings.frustumCulled = false;
+    scene.add(buildings);
   }
 
   // Halos de estrato (un solo draw call instanciado)
@@ -617,18 +637,19 @@ function buildLayer3D() {
       new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2));
     geo.instanceCount = n;
     const off = new Float32Array(n * 3), col = new Float32Array(n * 3);
-    const day = new Float32Array(n), est = new Float32Array(n);
+    const day = new Float32Array(n), est = new Float32Array(n), seed = new Float32Array(n);
     incidents.forEach((inc, i) => {
       const [x, z] = mercLocal(inc.lon, inc.lat);
       off.set([x, 0, z], i * 3);
       const c = dominantColor(inc);
       col.set([c.r, c.g, c.b], i * 3);
-      day[i] = inc.day; est[i] = inc.estrato;
+      day[i] = inc.day; est[i] = inc.estrato; seed[i] = (i % 1000) / 1000; // desfase de titileo
     });
     geo.setAttribute("iOffset", new THREE.InstancedBufferAttribute(off, 3));
     geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
     geo.setAttribute("iDay", new THREE.InstancedBufferAttribute(day, 1));
     geo.setAttribute("iEstrato", new THREE.InstancedBufferAttribute(est, 1));
+    geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(seed, 1));
     const mat = new THREE.ShaderMaterial({
       vertexShader: VERT_HALO, fragmentShader: FRAG_HALO,
       uniforms, transparent: true, depthWrite: false,
@@ -639,49 +660,54 @@ function buildLayer3D() {
     scene.add(halo);
   }
 
-  // Sistema de partículas de selección (se reconstruye por incidente)
-  let particles = null, glowMesh = null;
-  const partUniforms = {
-    uTime: uniforms.uTime,
-    uCenter: { value: new THREE.Vector3() },
-    uWave: { value: 80 },
-  };
+  // FX de selección: el edificio del incidente "arde" (fuego + humo) como en la
+  // escena cinemática. Emisores sobre la cubierta (w×d), volumen ∝ severidad, y se
+  // conserva el glow aditivo de EXPUESTOS. Se reconstruye por incidente seleccionado.
+  let fireFX = null, smokeFX = null, glowMesh = null;
+  const fxUniforms = { uTime: uniforms.uTime };
 
   function clearSelectionFX() {
-    if (particles) { scene.remove(particles); particles.geometry.dispose(); particles = null; }
+    [fireFX, smokeFX].forEach(o => { if (o) { scene.remove(o); o.geometry.dispose(); o.material.dispose(); } });
+    fireFX = smokeFX = null;
     if (glowMesh) { scene.remove(glowMesh); glowMesh.geometry.dispose(); glowMesh.material.dispose(); glowMesh = null; }
   }
 
   function spawnSelectionFX(inc) {
     clearSelectionFX();
     const [x, z] = mercLocal(inc.lon, inc.lat);
-    partUniforms.uCenter.value.set(x, 0, z);
-    // Volumen/densidad por conteo, con techos de presupuesto
-    const nSmoke = Math.min(900, inc.sinSignos * 140);   // volumen de columna
-    const nWave  = inc.rescatados > 0 ? 260 : 0;
-    const nSpark = Math.min(700, inc.afectados * 90);    // densidad browniana
-    partUniforms.uWave.value = 40 + Math.min(8, inc.rescatados) * 28; // radio máx
-    const n = nSmoke + nWave + nSpark;
-    if (n > 0) {
-      const pos = new Float32Array(n * 3);
-      const mode = new Float32Array(n), rand = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) {
-        mode[i] = i < nSmoke ? 0 : i < nSmoke + nWave ? 1 : 2;
-        rand.set([Math.random(), Math.random(), Math.random()], i * 3);
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      geo.setAttribute("aMode", new THREE.BufferAttribute(mode, 1));
-      geo.setAttribute("aRand", new THREE.BufferAttribute(rand, 3));
-      const mat = new THREE.ShaderMaterial({
-        vertexShader: VERT_PART, fragmentShader: FRAG_PART,
-        uniforms: partUniforms, transparent: true, depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      particles = new THREE.Points(geo, mat);
-      particles.frustumCulled = false;
-      scene.add(particles);
+    const h = inc._h || CONFIG.baseHeight, w = inc._w || 14, d = inc._d || 14;
+    const sevN = Math.max(0.25, inc._sevN || 0.2);
+    const c = dominantColor(inc);
+    const total = Math.floor(160 + sevN * 520);          // birth rate potenciado ∝ severidad
+    const site = new Float32Array(total * 3), span = new Float32Array(total * 2);
+    const col = new Float32Array(total * 3), rnd = new Float32Array(total * 3);
+    const sev = new Float32Array(total);
+    for (let k = 0; k < total; k++) {
+      site.set([x, h, z], k * 3);                         // emisor sobre la cubierta
+      span.set([w * 0.8, d * 0.8], k * 2);
+      col.set([c.r, c.g, c.b], k * 3);
+      rnd.set([Math.random(), Math.random(), Math.random()], k * 3);
+      sev[k] = sevN;
     }
+    const mk = (vs, fs, blend) => {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(total * 3), 3));
+      g.setAttribute("aSite", new THREE.BufferAttribute(site, 3));
+      g.setAttribute("aSpan", new THREE.BufferAttribute(span, 2));
+      g.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+      g.setAttribute("aRand", new THREE.BufferAttribute(rnd, 3));
+      g.setAttribute("aSev", new THREE.BufferAttribute(sev, 1));
+      const m = new THREE.ShaderMaterial({
+        vertexShader: vs, fragmentShader: fs, uniforms: fxUniforms,
+        transparent: true, depthWrite: false, blending: blend,
+      });
+      const pts = new THREE.Points(g, m);
+      pts.frustumCulled = false;
+      return pts;
+    };
+    smokeFX = mk(SMOKE_VS, SMOKE_FS, THREE.NormalBlending);
+    fireFX = mk(FIRE_VS, FIRE_FS, THREE.AdditiveBlending);
+    scene.add(smokeFX); scene.add(fireFX);
     if (inc.expuestos > 0) {
       // Grosor del contorno ∝ expuestos, acotado [0.08, 0.5]
       const thick = Math.min(0.5, 0.08 + inc.expuestos * 0.05);
@@ -699,11 +725,47 @@ function buildLayer3D() {
     }
   }
 
+  // ---- Picking 3D: raycast contra el volumen (AABB) de cada edificio ----
+  // Selecciona el edificio bajo el cursor aunque se clique en su cuerpo o cima
+  // (no solo en la base), respetando la visibilidad actual: día del timeline y
+  // revelado por zoom/selección o presencia dentro de la lente de contexto.
+  const _ray = new THREE.Ray();
+  const _box = new THREE.Box3();
+  const _hit = new THREE.Vector3();
+  const _invProj = new THREE.Matrix4();
+  function pick(ndcX, ndcY) {
+    _invProj.copy(camera.projectionMatrix).invert();
+    const near = new THREE.Vector3(ndcX, ndcY, -1).applyMatrix4(_invProj);
+    const far  = new THREE.Vector3(ndcX, ndcY,  1).applyMatrix4(_invProj);
+    _ray.origin.copy(near);
+    _ray.direction.copy(far.sub(near)).normalize();
+    const uDay = uniforms.uDay.value;
+    const lx = uniforms.uLens.value.x, lz = uniforms.uLens.value.y, lr = uniforms.uLens.value.z;
+    const revealed = uniforms.uReveal.value >= 0.5;
+    let best = -1, bestT = Infinity;
+    for (let i = 0; i < incidents.length; i++) {
+      const inc = incidents[i];
+      if (inc.day > uDay) continue;                         // futuro ⇒ no seleccionable
+      if (!revealed) {                                      // en macro solo lo visible bajo la lente
+        const dx = inc._x - lx, dz = inc._z - lz;
+        if (dx * dx + dz * dz > lr * lr) continue;
+      }
+      const hw = inc._w * 0.5, hd = inc._d * 0.5;
+      _box.min.set(inc._x - hw, 0, inc._z - hd);
+      _box.max.set(inc._x + hw, inc._h, inc._z + hd);
+      if (_ray.intersectBox(_box, _hit)) {
+        const t = _hit.distanceToSquared(_ray.origin);      // hit más cercano a la cámara
+        if (t < bestT) { bestT = t; best = i; }
+      }
+    }
+    return best;
+  }
+
   return {
     id: "incidents-3d",
     type: "custom",
     renderingMode: "3d",
-    uniforms, spawnSelectionFX, clearSelectionFX,
+    uniforms, spawnSelectionFX, clearSelectionFX, pick,
     onAdd(mapInst, gl) {
       renderer = new THREE.WebGLRenderer({ canvas: mapInst.getCanvas(), context: gl, antialias: true });
       renderer.autoClear = false;
@@ -732,20 +794,13 @@ const phaseEl = document.getElementById("phase-indicator");
 const fmtDate = d => new Date(CONFIG.epoch + d * 86400000)
   .toLocaleDateString("es-CO", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 
-function nearestIncident(lngLat, maxPx) {
-  const p = map.project(lngLat);
-  const dayMax = +document.getElementById("time-slider").value;
-  let best = -1, bestD = maxPx * maxPx;
-  for (let i = 0; i < incidents.length; i++) {
-    if (incidents[i].day > dayMax) continue;
-    const q = map.project([incidents[i].lon, incidents[i].lat]);
-    const dx = q.x - p.x, dy = q.y - p.y, d2 = dx * dx + dy * dy;
-    if (d2 < bestD) { bestD = d2; best = i; }
-  }
-  return best;
-}
-
 function setPhase(txt) { phaseEl.textContent = txt; }
+
+// Píxel del evento (CSS px del contenedor) → coordenadas NDC [-1, 1] para el raycast
+function ndc(point) {
+  const cv = map.getCanvas();
+  return [(point.x / cv.clientWidth) * 2 - 1, -((point.y / cv.clientHeight) * 2 - 1)];
+}
 
 map.on("mousemove", e => {
   if (!layer3D) return;
@@ -755,7 +810,9 @@ map.on("mousemove", e => {
   const [x, z] = mercLocal(e.lngLat.lng, e.lngLat.lat);
   layer3D.uniforms.uLens.value.set(x, z, CONFIG.lensRadiusPx * mpp);
 
-  const i = nearestIncident(e.lngLat, 26);
+  // edificio bajo el cursor por raycast (la lente ya se actualizó arriba)
+  const [nx, ny] = ndc(e.point);
+  const i = layer3D.pick(nx, ny);
   if (i >= 0) {
     const inc = incidents[i];
     tooltip.innerHTML =
@@ -775,19 +832,27 @@ map.on("mousemove", e => {
 });
 
 map.on("click", e => {
-  const i = nearestIncident(e.lngLat, 30);
+  // sincroniza la lente con el punto de clic (gate del picking en vista macro)
+  const mpp = 156543.03392 * Math.cos(e.lngLat.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+  const [lcx, lcz] = mercLocal(e.lngLat.lng, e.lngLat.lat);
+  layer3D.uniforms.uLens.value.set(lcx, lcz, CONFIG.lensRadiusPx * mpp);
+  const [nx, ny] = ndc(e.point);
+  const i = layer3D.pick(nx, ny);
   if (i < 0) { closeDetail(); return; }
   selected = i;
   const inc = incidents[i];
-  layer3D.spawnSelectionFX(inc);
+  layer3D.spawnSelectionFX(inc);          // el edificio seleccionado arde (fuego + humo)
   setPhase("FASE 3 · MICRO-ANÁLISIS");
-  // Interpolación de cámara a vista isométrica cercana
+  // Interpolación de cámara (paneo + zoom + rotación) a vista micro-isométrica.
+  // essential:true ⇒ la animación corre aun con "prefers-reduced-motion" activo
+  // (de lo contrario MapLibre salta al destino sin transición).
+  // offset desplaza el encuadre a la izquierda para no ocultar el edificio tras la tarjeta.
   map.flyTo({
     center: [inc.lon, inc.lat], zoom: 17.2, pitch: 62, bearing: -28,
-    duration: 2200,
+    duration: 2200, essential: true, offset: [-190, 20],
     easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2, // cubic in-out
   });
-  // Panel de datos en texto limpio
+  // Tarjeta de datos a la derecha
   document.getElementById("dp-title").textContent = inc.servicio;
   document.getElementById("dp-date").textContent = `${inc.fechaTxt} · ${inc.hora}`;
   document.getElementById("dp-loc").textContent = `${inc.barrio} — UPZ ${inc.upz}, ${inc.localidad} (Estrato ${inc.estrato})`;
@@ -800,8 +865,8 @@ map.on("click", e => {
     ["AFECTADOS", inc.afectados, "var(--c-afectados)"],
     ["EXPUESTOS", inc.expuestos, "var(--c-expuestos)"],
   ];
-  document.getElementById("dp-metrics").innerHTML = M.map(([n, v, c]) =>
-    `<div class="dp-metric"><span class="dot" style="background:${c};opacity:${v > 0 ? 1 : 0.18}"></span>` +
+  document.getElementById("dp-metrics").innerHTML = M.map(([n, v, cc]) =>
+    `<div class="dp-metric"><span class="dot" style="background:${cc};opacity:${v > 0 ? 1 : 0.18}"></span>` +
     `<span class="name" style="opacity:${v > 0 ? 1 : 0.35}">${n}</span>` +
     `<span class="count" style="opacity:${v > 0 ? 1 : 0.25}">${v}</span></div>`).join("");
   document.getElementById("detail-panel").classList.add("open");
@@ -812,7 +877,12 @@ function closeDetail() {
   selected = -1;
   document.getElementById("detail-panel").classList.remove("open");
   layer3D.clearSelectionFX();
-  map.flyTo({ zoom: 12.5, pitch: 30, bearing: 0, duration: 1600 });
+  // Reversión suave a la perspectiva macro (essential:true por reduced-motion)
+  map.flyTo({
+    center: CONFIG.center, zoom: 12.5, pitch: 30, bearing: 0,
+    duration: 1600, essential: true,
+    easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  });
   setPhase("FASE 1 · VISTA MACRO");
 }
 document.getElementById("close-panel").addEventListener("click", closeDetail);
@@ -827,13 +897,18 @@ map.on("move", () => {
 });
 
 // ---- Timeline ----
+// El slider se subdivide en CONFIG.timeScale pasos por día (rango numérico mayor):
+// el periodo se despliega más largo y los incidentes quedan más separados en el tiempo.
 const slider = document.getElementById("time-slider");
 const readout = document.getElementById("date-readout");
+const SLIDER_MAX = CONFIG.totalDays * CONFIG.timeScale;
+slider.max = SLIDER_MAX;
+slider.value = SLIDER_MAX;                  // arranca mostrando el final del periodo
 function applyDay() {
-  const d = +slider.value;
+  const d = (+slider.value) / CONFIG.timeScale;   // valor del slider → día real
   if (layer3D) layer3D.uniforms.uDay.value = d;
   readout.textContent = fmtDate(d);
-  slider.style.setProperty("--fill", (d / CONFIG.totalDays * 100) + "%");
+  slider.style.setProperty("--fill", (+slider.value / SLIDER_MAX * 100) + "%");
   if (map.getLayer("heat")) map.setFilter("heat", ["<=", ["get", "day"], d]);
 }
 slider.addEventListener("input", applyDay);
@@ -841,13 +916,13 @@ slider.addEventListener("input", applyDay);
 let playTimer = null;
 document.getElementById("play-btn").addEventListener("click", function () {
   if (playTimer) { clearInterval(playTimer); playTimer = null; this.textContent = "▶"; return; }
-  if (+slider.value >= CONFIG.totalDays) slider.value = 0;
+  if (+slider.value >= SLIDER_MAX) slider.value = 0;
   this.textContent = "❚❚";
   playTimer = setInterval(() => {
     slider.value = +slider.value + 1;
     applyDay();
-    if (+slider.value >= CONFIG.totalDays) { clearInterval(playTimer); playTimer = null; document.getElementById("play-btn").textContent = "▶"; }
-  }, 60);
+    if (+slider.value >= SLIDER_MAX) { clearInterval(playTimer); playTimer = null; document.getElementById("play-btn").textContent = "▶"; }
+  }, 35);
 });
 
 /* ---------------------------------------------------------------
