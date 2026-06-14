@@ -343,11 +343,13 @@ const map = new maplibregl.Map({
   pitch: 0,
   antialias: true,
   maxPitch: 70,
-  // Inercia de cámara: como la cámara es la de MapLibre (no un OrbitControls de
-  // Three), la amortiguación se calibra aquí. linearity↓ ⇒ más inercia;
-  // deceleration↓ ⇒ deslizamiento más largo; easing ease-out cuadrático ⇒ la
-  // parada nunca es mecánica sino una desaceleración suave y exponencial.
-  dragPan: { linearity: 0.2, easing: t => t * (2 - t), maxSpeed: 1400, deceleration: 1800 },
+  // Inercia de cámara: la cámara es la de MapLibre (NO un OrbitControls de Three;
+  // la cámara 3D se esclaviza a esta matriz por frame en render()). La inercia
+  // NATIVA de dragPan no producía un glide fiable en este visor (custom layer +
+  // triggerRepaint continuo), así que la ANULAMOS aquí (maxSpeed:0 ⇒ sin inercia
+  // nativa, el arrastre directo se conserva) y la reimplementamos explícitamente
+  // más abajo (sección 4c) con un integrador de momento sobre esta misma cámara.
+  dragPan: { maxSpeed: 0 },
 });
 // Zoom de rueda más orgánico (paso por incremento menor ⇒ desaceleración fina)
 map.scrollZoom.setZoomRate(1 / 130);
@@ -959,6 +961,32 @@ const mblurGauss = document.getElementById("mblur-gauss");
 let prevCenter = null, prevZoom = null, prevBearing = null, prevPitch = null;
 let blurX = 0, blurY = 0, blurOn = false;
 
+// Curva de respuesta VELOCIDAD→DESENFOQUE (px/frame → stdDeviation en px).
+// Antes el mapeo era lineal 1:1 (stdDeviation = velocidad), de modo que un
+// paneo lento de 2-3 px/frame ya producía un gaussiano de 2-3 px que arruinaba
+// la legibilidad. Se sustituye por «zona muerta + curva potencia»:
+//   · Por debajo de V0 el blur es exactamente 0  ⇒ paneos lentos e inercia
+//     residual quedan nítidos y el filtro se desengancha (coste GPU 0).
+//   · Entre V0 y V1 la magnitud crece como t^GAMMA (GAMMA>1): el exponente
+//     comprime el tramo bajo-medio y sólo deja florecer el blur cerca de V1.
+//   · En V1 (flings de inercia y flyTo) se alcanza el desenfoque máximo MAX.
+// Se descartó smoothstep porque su pendiente es MÁXIMA en el punto medio —
+// justo el rango que queremos mantener en calma. El coste del feGaussianBlur
+// crece con el radio del kernel (∝ std), así que rebajar la magnitud media es
+// además un ahorro neto de GPU, no sólo una mejora de legibilidad.
+const BLUR = {
+  V0: 2.2,    // px/frame — umbral de activación (zona muerta): por debajo, nitidez total
+  V1: 15,     // px/frame — velocidad de saturación: aquí se alcanza el blur máximo
+  GAMMA: 2.4, // >1 ⇒ comprime el rango bajo-medio, reserva la distorsión para lo rápido
+  MAX: 7,     // stdDeviation máximo (px) en saturación
+  OFF: 0.4,   // por debajo de este stdDeviation se desengancha el filtro (coste 0)
+};
+function velocityToBlur(v) {
+  const t = (v - BLUR.V0) / (BLUR.V1 - BLUR.V0);   // normaliza a la ventana de activación
+  if (t <= 0) return 0;                            // zona muerta: sin desenfoque
+  return BLUR.MAX * Math.pow(t < 1 ? t : 1, BLUR.GAMMA);
+}
+
 {   // El motion-blur acompaña al flyTo (essential:true): por coherencia, siempre activo.
   map.on("render", () => {
     const c = map.getCenter();
@@ -977,14 +1005,16 @@ let blurX = 0, blurY = 0, blurOn = false;
 
     // zoom/rotación/pitch no mueven el punto central ⇒ término isótropo adicional
     const iso = dz * 26 + db * 0.7 + dp * 0.55;
-    const tx = Math.abs(px) + iso;
-    const ty = Math.abs(py) + iso;
+    // velocidad de cámara por eje → magnitud de blur a través de la curva no lineal
+    const tx = velocityToBlur(Math.abs(px) + iso);
+    const ty = velocityToBlur(Math.abs(py) + iso);
 
-    // subida inmediata al objetivo, caída exponencial (0.80/frame) al detenerse
-    blurX = Math.min(7, Math.max(tx, blurX * 0.80));
-    blurY = Math.min(7, Math.max(ty, blurY * 0.80));
+    // subida inmediata al objetivo, caída exponencial (0.80/frame) al detenerse.
+    // velocityToBlur ya acota a [0, MAX] ⇒ el arrastre decae pero nunca lo supera.
+    blurX = Math.max(tx, blurX * 0.80);
+    blurY = Math.max(ty, blurY * 0.80);
 
-    if (blurX < 0.12 && blurY < 0.12) {
+    if (blurX < BLUR.OFF && blurY < BLUR.OFF) {
       if (blurOn) { map.getCanvas().style.filter = ""; blurOn = false; }
     } else {
       mblurGauss.setAttribute("stdDeviation", blurX.toFixed(2) + " " + blurY.toFixed(2));
@@ -1022,6 +1052,72 @@ function springStep() {
 function openPanel()  { spring.target = 1; if (!spring.raf) spring.raf = requestAnimationFrame(springStep); }
 function closePanel() { spring.target = 0; if (!spring.raf) spring.raf = requestAnimationFrame(springStep); }
 applyPanel(0);   // estado inicial coherente (panel cerrado)
+
+/* ---------------------------------------------------------------
+   4c. INERCIA DE PANEO EXPLÍCITA (momentum scroll 3D)
+   La inercia nativa de dragPan no daba glide fiable aquí, así que la integramos
+   nosotros sobre la MISMA cámara de MapLibre (no un control de Three). Durante el
+   arrastre muestreamos la trayectoria del CENTRO que produce el dragPan nativo;
+   al soltar la continuamos por frame con setCenter y decaimiento exponencial.
+   · A prueba de signos: continúa el movimiento real del centro (no reinterpreta
+     direcciones de cursor ni convenciones de panBy).
+   · Independiente del zoom: umbrales y tope relativos al ancho del viewport.
+   · Alimenta el motion-blur gratis: cada setCenter mueve el centro ⇒ el handler
+     de render lee la velocidad y la curva no lineal decide el desenfoque.
+   --------------------------------------------------------------- */
+{
+  const F = 0.92;        // fricción por frame (↑ = glide más largo)
+  const SMOOTH = 0.55;   // suavizado exponencial de la velocidad de arrastre
+  const START_PX = 2;    // px/frame al soltar por debajo de los cuales NO hay glide
+  const MAX_PX = 50;     // tope de velocidad de soltado (px/frame): evita flings desbocados
+  const STOP_PX = 0.3;   // px/frame por debajo de los cuales el glide se detiene
+  const SAMPLE_MS = 90;  // pausa antes de soltar ⇒ sin impulso (inercia "real")
+
+  let active = false, prevC = null, prevT = 0, lastMoveT = 0;
+  let dLng = 0, dLat = 0, raf = 0;
+  const cancel = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
+
+  map.on("dragstart", () => {
+    cancel(); active = true; dLng = dLat = 0;
+    prevC = map.getCenter(); prevT = lastMoveT = performance.now();
+  });
+  map.on("drag", () => {
+    if (!active || !prevC) return;
+    const c = map.getCenter(), now = performance.now();
+    const k = 16.7 / Math.max(1, now - prevT);          // normaliza a Δ por frame (~60fps)
+    dLng = dLng * (1 - SMOOTH) + (c.lng - prevC.lng) * k * SMOOTH;
+    dLat = dLat * (1 - SMOOTH) + (c.lat - prevC.lat) * k * SMOOTH;
+    prevC = c; prevT = lastMoveT = now;
+  });
+  map.on("dragend", () => {
+    if (!active) return;
+    active = false;
+    if (performance.now() - lastMoveT > SAMPLE_MS) return;   // se detuvo antes de soltar
+    if (Math.hypot(dLng, dLat) < 1e-9) return;
+    // velocidad de soltado convertida a PÍXELES/frame (correcta a cualquier zoom/pitch):
+    // proyecta el centro y el centro+Δ y mide su separación en pantalla.
+    const c = map.getCenter();
+    const p0 = map.project(c);
+    const p1 = map.project([c.lng + dLng, c.lat + dLat]);
+    let px = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    if (px < START_PX) return;                                // arrastre lento ⇒ sin glide
+    if (px > MAX_PX) { const s = MAX_PX / px; dLng *= s; dLat *= s; px = MAX_PX; }
+    const stopDeg = Math.hypot(dLng, dLat) * (STOP_PX / px);  // umbral de parada (en grados, ∝ px)
+    map.stop();                                               // anula cualquier ease residual
+    const step = () => {
+      const cc = map.getCenter();
+      map.setCenter([cc.lng + dLng, cc.lat + dLat]);          // continúa la trayectoria del centro
+      dLng *= F; dLat *= F;
+      if (Math.hypot(dLng, dLat) > stopDeg) raf = requestAnimationFrame(step);
+      else raf = 0;
+    };
+    raf = requestAnimationFrame(step);
+  });
+  // Re-agarre, clic de selección o zoom de rueda ⇒ cortar el glide en curso
+  const cont = map.getCanvasContainer();
+  cont.addEventListener("pointerdown", cancel);
+  cont.addEventListener("wheel", cancel, { passive: true });
+}
 
 /* ---------------------------------------------------------------
    5. ARRANQUE
