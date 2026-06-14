@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8801", "--directory", "incidentes-3d"],
       "port": 8801
+    },
+    {
+      "name": "quant-dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8802", "--directory", "C:/UNIVERSIDAD/UNIVERSIDAD/INTERSEMESTRALES/CLAUDE CODE"],
+      "port": 8802
     }
   ]
 }
