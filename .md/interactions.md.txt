@@ -1,0 +1,9 @@
+# Interacciones Globales
+
+## Enjambre de Partículas 3D (Vista Principal)
+- **Tecnología:** Vínculos al DOM con Vanilla JavaScript y renderizado en Canvas/WebGL.
+- **Trigger:** Eventos `mousemove` y `touchmove`.
+- **Comportamiento Reactivo:** Las partículas se dispersan (repulsión) cuando el cursor/esfera interactiva pasa cerca de ellas.
+- **Física:** - Radio de repulsión del cursor: `150px`.
+  - Retorno: Las partículas deben volver a su posición de origen suavemente (usar interpolación lineal o `lerp` con un factor de `0.05`).
+- **Estado Inactivo:** Si el usuario no mueve el mouse, las partículas mantienen un movimiento de flotación sutil usando funciones seno/coseno.

@@ -12,6 +12,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8802", "--directory", "C:/UNIVERSIDAD/UNIVERSIDAD/INTERSEMESTRALES/CLAUDE CODE"],
       "port": 8802
+    },
+    {
+      "name": "nocturnal-intel",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8803", "--directory", "nocturnal-intel"],
+      "port": 8803
     }
   ]
 }
