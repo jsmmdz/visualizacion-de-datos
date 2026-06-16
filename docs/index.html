@@ -228,7 +228,7 @@
   <div class="row">
     <button id="play-btn" title="Reproducir línea de tiempo">▶</button>
     <label>Timeline</label>
-    <input type="range" id="time-slider" min="0" max="243" value="243" step="1" />
+    <input type="range" id="time-slider" min="0" max="1215" value="0" step="1" />
     <div id="date-readout">—</div>
   </div>
 </div>
@@ -270,14 +270,13 @@ const CONFIG = {
   center: [-74.085, 4.62],
   epoch: Date.UTC(2020, 0, 1),            // día 0 del dataset
   totalDays: 243,                          // 1-ene → 31-ago 2020
-  decayK: 0.025,                           // alpha(t) = max(0.06, exp(-k * Δdías))
+  decayK: 0.025,                           // decaimiento temporal del edificio: max(0.85, exp(-k·Δdías))
   lensRadiusPx: 160,                       // radio de la lente de contexto (px pantalla)
   reveal3DZoom: 14.5,                      // zoom a partir del cual el 3D es permanente
   baseHeight: 55,                          // altura base de extrusión (m)
+  lifespanDays: 40,                        // ciclo de vida: cada incidente se renderiza solo en dt ∈ [0, 40] días
   timeScale: 5,                            // subdivisiones del slider por día: timeline más largo
                                            // ⇒ los incidentes se despliegan con más separación
-  haloStrobe: 1.0,                         // días de la fase de titileo estroboscópico (sirena)
-  haloFade: 2.6,                           // días de la fase de desvanecimiento exponencial
 };
 
 const COLORS = {
@@ -462,18 +461,32 @@ const VERT_BUILDING = `
   varying float vH;
   void main() {
     vColor = iColor; vSeed = iSeed; vBurn = iBurn; vNrm = normal; vH = iDim.y;
-    vec3 p = position * iDim;          // caja unidad (base en y=0) → volumen w×h×d
+    // CICLO DE VIDA en GPU: el incidente solo se renderiza mientras dt ∈ (0, LIFESPAN) días.
+    //   alive = 1 sólo en esa ventana — APARECE tras su día (frontera estricta abajo ⇒
+    //   lienzo limpio en el día 0) y DESAPARECE al CUMPLIR 40 días (frontera estricta arriba).
+    // OCULTACIÓN ÓPTIMA (discard vs. colapso): para los NO-vivos no rasterizamos y luego
+    // descartamos; COLAPSAMOS la geometría en el vértice (position·alive): si alive=0, los
+    // 8 vértices caen en iOffset ⇒ triángulos de área 0 (degenerados) ⇒ el ensamblador de
+    // primitivas los descarta ANTES de rasterizar ⇒ CERO fragmentos para obsoletos/futuros
+    // (la mayoría del dataset en cualquier uDay). Branchless, sin divergencia de warp.
+    // HONESTIDAD sobre early-Z: este pase lo mantiene DESACTIVADO por el discard del
+    // fragment, que NO es por el ciclo de vida (ya colapsado) sino por la LENTE de contexto
+    // en vista macro (edificio vivo fuera de la lente ⇒ vAlpha→0 ⇒ descartado). El colapso
+    // no restaura el early-Z; su ganancia es evitar la rasterización/fragmentos de los no-vivos.
+    float dt = uDay - iDay;
+    float alive = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // dt ∈ (0, 40): muere EXACTO al día 40
+    vec3 p = position * iDim * alive;   // volumen w×h×d (o un punto degenerado si no vive)
     vObj = p;
     vec3 world = p + iOffset;
     // Decaimiento temporal: alpha = exp(-k·Δdías); suelo alto (0.85) ⇒ edificios sólidos,
     // no fantasmales, conservando un leve gradiente de antigüedad
-    float dt = uDay - iDay;
-    float visible = step(0.0, dt);                       // futuro ⇒ oculto
     float decay = max(0.85, exp(-${CONFIG.decayK.toFixed(4)} * dt));
     // Lente de contexto: borde suave de 25% del radio
     float dLens = distance(world.xz, uLens.xy);
     float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
-    vAlpha = visible * decay * max(lens, uReveal);
+    // alive ya colapsó los no-vivos; en los vivos, la LENTE sigue gobernando el discard
+    // del fragment (edificio vivo fuera de la lente en macro ⇒ vAlpha→0 ⇒ descartado).
+    vAlpha = alive * decay * max(lens, uReveal);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
 `;
@@ -521,61 +534,93 @@ const FRAG_BUILDING = `
   }
 `;
 
-// ---- Halos de estrato ----
-// Radio e intensidad inversamente proporcionales al estrato:
-// f(e) = (7 − e) / 6  ⇒  estrato 1 → 1.0, estrato 6 → 0.167
+// ---- Base de incidente · "Cybernetic Premium OS" ----
+// Reticle limpio (anillo fino) que sustituye al antiguo blob de estrato. Sobre TODA
+// instancia ya aparecida corre una ANIMACIÓN DUAL simultánea:
+//   · SIRENA  → barrido angular que orbita rápido (rotativo), confinado al borde.
+//   · PULSO   → respiración senoidal lenta (radio + opacidad) + anillo que viaja.
+// Datos: iRadius (m) ∝ heridos/afectados; iSev (0..1) gravedad → color en GPU.
+// Optimización vs. la ruta sugerida (setMatrixAt / iColor vec3):
+//   - Esta capa NO usa InstancedMesh: la escala es 1 float (iRadius) en el VS, no
+//     una mat4 de 16 floats por instancia (16× menos buffer, sin multiplicar matriz).
+//   - El color va como 1 float (iSev) y la rampa verde→ámbar→carmesí se evalúa en el
+//     VÉRTICE (4 invocaciones/instancia) y viaja como varying plano — no por fragmento
+//     (miles de invocaciones). Net: −2 floats/instancia y la rampa corre ~10³× menos.
 const VERT_HALO = `
-  attribute vec3 iOffset;
-  attribute vec3 iColor;
-  attribute float iDay;
-  attribute float iEstrato;
-  attribute float iSeed;
+  attribute vec3 iOffset;       // base del incidente en coords locales (m)
+  attribute float iDay;         // día del incidente (cull de futuro vs. timeline)
+  attribute float iSev;         // 0..1 gravedad ponderada → color
+  attribute float iRadius;      // radio base en metros (∝ heridos/afectados)
+  attribute float iSeed;        // desfase de fase por instancia (sirena/pulso)
   uniform float uTime;
   uniform float uDay;
   uniform vec3 uLens;
   uniform float uReveal;
+  varying vec2 vUv;
   varying vec3 vColor;
   varying float vAlpha;
-  varying vec2 vUv;
-  varying float vIntensity;
+  varying float vSeed;
+  varying float vSev;
+  // Rampa de gravedad evaluada UNA vez por vértice: verde (bajo) → ámbar (medio)
+  // → carmesí (alto). Dos tramos mix+smoothstep ⇒ punto medio ámbar controlado y
+  // sin banding (más suave y barato que el step() por fragmento de la ruta base).
+  vec3 gravityRamp(float s) {
+    vec3 lo  = vec3(0.18, 0.95, 0.42);   // verde   — menor impacto
+    vec3 mid = vec3(1.00, 0.62, 0.07);   // ámbar   — impacto medio
+    vec3 hi  = vec3(0.86, 0.07, 0.18);   // carmesí — alta criticidad
+    vec3 c = mix(lo, mid, smoothstep(0.0, 0.5, s));
+    return mix(c, hi, smoothstep(0.5, 1.0, s));
+  }
   void main() {
     vUv = uv * 2.0 - 1.0;
-    float f = (7.0 - iEstrato) / 6.0;
-    vIntensity = f;
-    vColor = iColor;
-    vec3 p = position * (30.0 + 110.0 * f);  // radio del halo en metros
-    vec3 world = p + iOffset; world.y = 0.5;
-    // Secuencia temporal por incidente — dt = días desde su aparición (según el slider):
-    //   Fase 1 (0 .. T1): TITILEO ESTROBOSCÓPICO tipo sirena de bomberos (rápido, en tiempo real)
-    //   Fase 2 (T1 .. T1+T2): DESVANECIMIENTO exponencial rápido y suave hacia opacidad 0
+    vSeed = iSeed; vSev = iSev;
+    vColor = gravityRamp(iSev);
+    // PULSO ELEGANTE (1/2): respiración senoidal lenta del radio (escala sutil).
+    float breathe = 0.5 + 0.5 * sin(uTime * 1.6 + iSeed * 6.2831);
+    // CICLO DE VIDA en GPU (idéntico al edificio): visible solo en dt ∈ (0, LIFESPAN).
+    // alive=0 ⇒ radio 0 ⇒ los 4 vértices del quad caen en iOffset ⇒ quad degenerado
+    // ⇒ culled antes de rasterizar (cero fragmentos de barrido/pulso para obsoletos).
     float dt = uDay - iDay;
-    float T1 = ${CONFIG.haloStrobe.toFixed(2)};
-    float T2 = ${CONFIG.haloFade.toFixed(2)};
-    float strobe = mix(0.12, 1.0, step(0.0, sin(uTime * 44.0 + iSeed * 39.0)));  // ~7 Hz on/off
-    float env = 0.0;
-    if (dt >= 0.0 && dt < T1) {
-      env = strobe;                                          // Fase 1: titileo
-    } else if (dt >= T1 && dt <= T1 + T2) {
-      env = exp(-4.0 * (dt - T1) / T2);                      // Fase 2: fade exponencial → ~0
-    }
+    float alive = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // dt ∈ (0, 40): muere exacto al día 40
+    float radius = iRadius * (0.94 + 0.10 * breathe) * alive;
+    vec3 p = position * radius;                 // disco de 'radius' m (o punto degenerado si no vive)
+    vec3 world = p + iOffset; world.y = 0.6;
     float dLens = distance(world.xz, uLens.xy);
     float lens = 1.0 - smoothstep(uLens.z * 0.75, uLens.z, dLens);
-    vAlpha = env * max(lens, uReveal);
+    // El pulso elegante modula también la opacidad base.
+    vAlpha = alive * max(lens, uReveal) * (0.55 + 0.45 * breathe);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
 `;
 const FRAG_HALO = `
   precision highp float;
+  uniform float uTime;
+  varying vec2 vUv;
   varying vec3 vColor;
   varying float vAlpha;
-  varying vec2 vUv;
-  varying float vIntensity;
+  varying float vSeed;
+  varying float vSev;
   void main() {
     float r = length(vUv);
     if (r > 1.0 || vAlpha < 0.01) discard;
-    // anillo concéntrico: máximo en r≈0.55, caída radial suave
-    float ring = smoothstep(0.0, 0.55, r) * (1.0 - smoothstep(0.55, 1.0, r));
-    gl_FragColor = vec4(vColor, ring * vAlpha * (0.35 + 0.7 * vIntensity));
+    // 1) Anillo perimetral nítido (reticle premium): línea fina, no blob.
+    float ring = smoothstep(0.07, 0.0, abs(r - 0.82));
+    // 2) Relleno interior tenue (glow suave, no saturado).
+    float fill = (1.0 - smoothstep(0.0, 0.82, r)) * 0.08;
+    // 3) PULSO: anillo concéntrico que viaja hacia afuera y se desvanece.
+    float pr = fract(uTime * 0.45 + vSeed);
+    float pulse = smoothstep(0.06, 0.0, abs(r - pr * 0.82)) * (1.0 - pr) * 0.7;
+    // 4) SIRENA: barrido angular que orbita rápido (rotativo), confinado al borde.
+    //    La frecuencia sube con la gravedad ⇒ los críticos "giran" con más urgencia.
+    float ang = atan(vUv.y, vUv.x);
+    float spin = 6.0 + vSev * 6.0;
+    float sweep = pow(0.5 + 0.5 * sin(ang - uTime * spin + vSeed * 6.2831), 6.0);
+    sweep *= smoothstep(0.45, 0.82, r);
+    // Alfa = (anillo + relleno + pulso) modulado por el pulso elegante (vAlpha), +
+    // el barrido de sirena. El barrido además sobre-ilumina el color (acento scanner).
+    float a = (ring + fill + pulse + sweep * 0.9) * vAlpha;
+    vec3 col = vColor * (1.0 + sweep * 0.7);
+    gl_FragColor = vec4(col, a);
   }
 `;
 
@@ -663,7 +708,7 @@ function buildLayer3D() {
 
   const uniforms = {
     uTime: { value: 0 },
-    uDay: { value: CONFIG.totalDays },
+    uDay: { value: 0 },                 // arranca en el día 0 (lienzo limpio); applyDay() lo gobierna
     uLens: { value: new THREE.Vector3(1e9, 1e9, 0) },
     uReveal: { value: 0 },
   };
@@ -714,25 +759,37 @@ function buildLayer3D() {
     scene.add(buildings);
   }
 
-  // Halos de estrato (un solo draw call instanciado)
+  // Bases de incidente (un solo draw call instanciado) — reticle "Cybernetic
+  // Premium OS" con animación dual (sirena + pulso). Buffer por instancia: 7 floats
+  // (iOffset3 + iDay1 + iSev1 + iRadius1 + iSeed1) = 28 B ⇒ ~560 KB para 20K
+  // (vs. 720 KB con el iColor vec3 anterior). El cuello de botella real es el
+  // fill-rate de los quads aditivos, que la lente/zoom ya acotan — no el buffer.
   {
     const n = incidents.length;
     const geo = new THREE.InstancedBufferGeometry().copy(
       new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2));
     geo.instanceCount = n;
-    const off = new Float32Array(n * 3), col = new Float32Array(n * 3);
-    const day = new Float32Array(n), est = new Float32Array(n), seed = new Float32Array(n);
+    const off = new Float32Array(n * 3);
+    const day = new Float32Array(n), sev = new Float32Array(n);
+    const rad = new Float32Array(n), seed = new Float32Array(n);
     incidents.forEach((inc, i) => {
       const [x, z] = mercLocal(inc.lon, inc.lat);
       off.set([x, 0, z], i * 3);
-      const c = dominantColor(inc);
-      col.set([c.r, c.g, c.b], i * 3);
-      day[i] = inc.day; est[i] = inc.estrato; seed[i] = (i % 1000) / 1000; // desfase de titileo
+      day[i] = inc.day;
+      // GRAVEDAD (0..1) → color: misma severidad ponderada que la altura del edificio
+      // (prioriza pérdidas humanas) ⇒ codificación coherente entre volumen y base.
+      const g = inc.sinSignos * 5 + inc.heridos * 3 + inc.rescatados * 2 + inc.afectados + inc.expuestos;
+      sev[i] = Math.min(1, g / 12);
+      // RADIO (m) ∝ heridos/afectados (heridos pesan más). Piso de 34 m ⇒ TODO
+      // incidente tiene base visible (refuerza el "se aplica a todas las instancias").
+      const vict = inc.heridos * 1.0 + inc.afectados * 0.5;
+      rad[i] = 34 + 120 * Math.min(1, vict / 8);
+      seed[i] = (i % 1000) / 1000;   // desfase de fase del barrido/pulso
     });
     geo.setAttribute("iOffset", new THREE.InstancedBufferAttribute(off, 3));
-    geo.setAttribute("iColor", new THREE.InstancedBufferAttribute(col, 3));
     geo.setAttribute("iDay", new THREE.InstancedBufferAttribute(day, 1));
-    geo.setAttribute("iEstrato", new THREE.InstancedBufferAttribute(est, 1));
+    geo.setAttribute("iSev", new THREE.InstancedBufferAttribute(sev, 1));
+    geo.setAttribute("iRadius", new THREE.InstancedBufferAttribute(rad, 1));
     geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(seed, 1));
     const mat = new THREE.ShaderMaterial({
       vertexShader: VERT_HALO, fragmentShader: FRAG_HALO,
@@ -829,7 +886,8 @@ function buildLayer3D() {
     let best = -1, bestT = Infinity;
     for (let i = 0; i < incidents.length; i++) {
       const inc = incidents[i];
-      if (inc.day > uDay) continue;                         // futuro ⇒ no seleccionable
+      if (inc.day >= uDay) continue;                        // aún no aparecido (dt≤0) ⇒ no seleccionable
+      if (uDay - inc.day >= CONFIG.lifespanDays) continue;  // obsoleto (≥40 d) ⇒ ya no se renderiza
       if (!revealed) {                                      // en macro solo lo visible bajo la lente
         const dx = inc._x - lx, dz = inc._z - lz;
         if (dx * dx + dz * dz > lr * lr) continue;
@@ -953,18 +1011,22 @@ map.on("click", e => {
   openPanel();       // muelle físico: montaje del panel con desaceleración natural
 });
 
-function closeDetail() {
+function closeDetail(recenter = true) {
   if (selected < 0) return;
   selected = -1;
   closePanel();   // muelle físico: desmontaje del panel
   cancelMetrics();   // corta cualquier count-up en curso (evita solapes al reabrir)
   layer3D.clearSelectionFX();
-  // Reversión suave a la perspectiva macro (essential:true por reduced-motion)
-  map.flyTo({
-    center: CONFIG.center, zoom: 12.5, pitch: 30, bearing: 0,
-    duration: 1600, essential: true,
-    easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
-  });
+  // Reversión suave a la perspectiva macro — SOLO en cierres iniciados por el usuario
+  // (botón ✕ / Esc / clic en vacío, que llaman closeDetail() ⇒ recenter=true). Los cierres
+  // por fin-de-vida al mover el timeline pasan recenter=false ⇒ no secuestran la cámara.
+  if (recenter) {
+    map.flyTo({
+      center: CONFIG.center, zoom: 12.5, pitch: 30, bearing: 0,
+      duration: 1600, essential: true,
+      easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+    });
+  }
   setPhase("FASE 1 · VISTA MACRO");
 }
 document.getElementById("close-panel").addEventListener("click", closeDetail);
@@ -985,13 +1047,23 @@ const slider = document.getElementById("time-slider");
 const readout = document.getElementById("date-readout");
 const SLIDER_MAX = CONFIG.totalDays * CONFIG.timeScale;
 slider.max = SLIDER_MAX;
-slider.value = SLIDER_MAX;                  // arranca mostrando el final del periodo
+slider.value = 0;                           // arranca en el día 0 (1-ene): lienzo limpio, sin incidentes prematuros
 function applyDay() {
   const d = (+slider.value) / CONFIG.timeScale;   // valor del slider → día real
   if (layer3D) layer3D.uniforms.uDay.value = d;
   readout.textContent = fmtDate(d);
   slider.style.setProperty("--fill", (+slider.value / SLIDER_MAX * 100) + "%");
-  if (map.getLayer("heat")) map.setFilter("heat", ["<=", ["get", "day"], d]);
+  // Heatmap macro: misma ventana de vida que la GPU ⇒ día ∈ (d − LIFESPAN, d)
+  // (estricta en ambos bordes: aparece tras su día ⇒ vacío en d=0; muere al cumplir 40 días).
+  if (map.getLayer("heat"))
+    map.setFilter("heat", ["all", ["<", ["get", "day"], d], [">", ["get", "day"], d - CONFIG.lifespanDays]]);
+  // Si el incidente seleccionado sale de su ventana de vida al mover el tiempo, ciérralo —
+  // SIN recolocar la cámara: no es una acción del usuario, evita un flyTo intempestivo al
+  // scrubear/reproducir. (Esto también retira sus efectos fuego/humo/glow vía clearSelectionFX.)
+  if (selected >= 0) {
+    const age = d - incidents[selected].day;
+    if (age <= 0 || age >= CONFIG.lifespanDays) closeDetail(false);
+  }
 }
 slider.addEventListener("input", applyDay);
 
