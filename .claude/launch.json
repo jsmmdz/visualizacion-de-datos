@@ -18,6 +18,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8803", "--directory", "nocturnal-intel"],
       "port": 8803
+    },
+    {
+      "name": "viz-docs",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8804", "--directory", "docs"],
+      "port": 8804
     }
   ]
 }

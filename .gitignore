@@ -1,0 +1,3 @@
+node_modules/
+# Harness de verificación de la Intel Card (local, no se publica en Pages)
+docs/_preview-intel.html

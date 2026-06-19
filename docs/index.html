@@ -84,7 +84,52 @@
     width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
     font-size: 10px; line-height: 1; transition: border-color 0.2s, transform 0.2s, background 0.2s;
   }
-  #play-btn:hover { border-color: var(--accent); background: rgba(255,186,32,0.16); transform: scale(1.08); }
+  #play-btn:hover { border-color: var(--accent); background: rgba(255,186,32,0.16); }  /* scale → Motion (único dueño del transform) */
+
+  /* ---- Toggle VISTA GLOBAL (override de la ventana de 40 días) ---- */
+  #showall-btn {
+    display: inline-flex; align-items: center; gap: 7px; flex: none;
+    height: 30px; padding: 0 12px; border-radius: 999px; cursor: pointer;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--line);
+    color: var(--ink-dim); font-family: var(--mono); font-size: 9px;
+    letter-spacing: 0.16em; text-transform: uppercase; white-space: nowrap;
+    transition: color .2s, border-color .2s, background .2s, box-shadow .2s;
+  }
+  #showall-btn .sa-ic { width: 14px; height: 14px; flex: none; }
+  #showall-btn:hover { color: var(--ink); border-color: var(--accent); background: rgba(255,186,32,0.10); }
+  #showall-btn[aria-pressed="true"] {                  /* estado ON: realce ámbar minimalista (sin relleno pleno) */
+    color: var(--accent); border-color: var(--accent);
+    background: rgba(255,186,32,0.14);
+    box-shadow: 0 0 14px var(--glow), inset 0 0 12px rgba(255,186,32,0.10);
+  }
+  #showall-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+  /* ---- Onboarding del Play: tooltip flotante + anillo pulsante ---- */
+  #play-coach {
+    position: absolute; left: 8px; bottom: calc(100% + 10px); z-index: 12;
+    pointer-events: none; opacity: 0;                  /* Motion lo revela; reduced-motion lo fija a 1 */
+    background: var(--bg-panel); border: 1px solid var(--line);
+    backdrop-filter: blur(20px) saturate(140%); -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border-radius: 10px; padding: 7px 11px; box-shadow: 0 0 18px var(--glow);
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--primary); white-space: nowrap;
+  }
+  #play-coach::after {                                 /* pico apuntando al botón Play */
+    content: ""; position: absolute; top: 100%; left: 18px;
+    border: 5px solid transparent; border-top-color: var(--bg-panel);
+  }
+  @keyframes coachRing {
+    0%   { box-shadow: 0 0 0 0 rgba(255,186,32,0.45); }
+    70%  { box-shadow: 0 0 0 11px rgba(255,186,32,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,186,32,0); }
+  }
+  #play-btn.coach { animation: coachRing 1.8s ease-out infinite; }   /* box-shadow ≠ transform ⇒ no choca con tactile() */
+
+  /* Móvil: el toggle se reduce a sólo-ícono (como el label del timeline) */
+  @media (max-width: 640px) {
+    #showall-btn { padding: 0 9px; }
+    #showall-btn .sa-tx { display: none; }
+  }
   input[type="range"] {
     flex: 1; -webkit-appearance: none; appearance: none; height: 2px;
     background: linear-gradient(90deg, var(--accent) var(--fill, 100%), rgba(255,255,255,0.15) var(--fill, 100%));
@@ -130,24 +175,44 @@
   .dp-section { margin-bottom: 22px; }
   .dp-label { font-family: var(--mono); font-size: 9px; color: var(--ink-dim); letter-spacing: 0.22em; text-transform: uppercase; margin-bottom: 6px; }
   .dp-value { font-size: 12.5px; line-height: 1.55; }
-  /* Filas de métrica: estado inicial de la cascada (opacity/transform = compositor).
-     flex-wrap ⇒ la barra .dp-bar cae a una 2ª línea ocupando todo el ancho. */
-  .dp-metric { display: flex; flex-wrap: wrap; align-items: center; padding: 8px 0;
-    border-bottom: 1px solid rgba(255,255,255,0.07);
-    opacity: 0; transform: translateY(8px);
-    transition: opacity .30s ease-out, transform .38s cubic-bezier(0.16,1,0.3,1);
-    transition-delay: calc(var(--i, 0) * 55ms); }
-  .dp-metric.in { opacity: 1; transform: translateY(0); }          /* destino de la cascada */
-  .dp-metric .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 10px; flex: none; }
-  .dp-metric .name { flex: 1; font-size: 11px; letter-spacing: 0.05em; }
-  .dp-metric .count { font-family: var(--mono); font-size: 14px; font-weight: 600;
-    font-variant-numeric: tabular-nums; min-width: 2.5ch; display: inline-block; text-align: right; }
-  /* Aisla el reflow del count-up del resto del documento */
-  #dp-metrics { contain: layout paint; }
-  /* Barra: pista + relleno sólido escalado con scaleX (compositor, NO width).
-     El redondeo/recorte lo da el CONTENEDOR (overflow:hidden); el relleno es plano. */
-  .dp-bar { flex-basis: 100%; position: relative; height: 2px; margin-top: 6px;
-    border-radius: 1px; overflow: hidden; background: rgba(255,255,255,0.06); }
+  /* ============ BENTO DE MICRO-TARJETAS (Intel Card) ============
+     Cada valor vive en su propia micro-tarjeta. El reveal (stagger + spring) lo
+     posee Motion (WAAPI ⇒ compositor, sin un 2º rAF que dispute el hilo con el mapa).
+     Se animan SOLO opacity/transform; el HOVER no usa transform ⇒ cero layout shift,
+     un único dueño del transform por nodo. `contain: layout` aísla el count-up. */
+  .bento { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; contain: layout; }
+  .bento-card {
+    position: relative; display: flex; flex-direction: column; gap: 5px;
+    padding: 11px 12px 12px; border-radius: 12px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    --mc: var(--accent);                                   /* acento por tarjeta (override inline) */
+    transition: border-color .22s ease, background .22s ease, box-shadow .22s ease;
+    backface-visibility: hidden;                           /* la cara que anima Motion se mantiene nítida */
+  }
+  .bento-card.span2 { grid-column: 1 / -1; }
+  .bento-card:hover {                                      /* feedback sin transform (estable) */
+    border-color: color-mix(in srgb, var(--mc) 50%, transparent);
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mc) 16%, transparent),
+                0 0 14px color-mix(in srgb, var(--mc) 12%, transparent);
+  }
+  .bc-head { display: flex; align-items: center; gap: 7px; min-height: 13px; }
+  .bc-label { font-family: var(--mono); font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); }
+  .bc-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; box-shadow: 0 0 6px var(--mc); }
+  .bc-ic { width: 13px; height: 13px; margin-left: auto; flex: none; color: var(--mc); opacity: 0.42; }
+  .bc-value { font-family: var(--mono); font-size: 17px; font-weight: 600; line-height: 1.12;
+    color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+  .bc-value.mono { font-size: 12.5px; font-weight: 500; letter-spacing: 0.04em; word-break: break-word; }
+  .bc-value.accent { color: var(--mc); }
+  /* Métrica: número algo mayor; el color vive en el punto + barra (limpio, no recargado) */
+  .bento-card.metric .bc-value { font-size: 18px; }
+  .bento-card.metric-zero .bc-dot { opacity: 0.2; box-shadow: none; }
+  .bento-card.metric-zero .bc-label, .bento-card.metric-zero .bc-value { opacity: 0.4; }
+  /* Barra: pista + relleno escalado con scaleX (compositor, NO width) */
+  .dp-bar { position: relative; height: 2px; margin-top: 3px; border-radius: 1px;
+    overflow: hidden; background: rgba(255, 255, 255, 0.07); }
   .dp-bar-fill { display: block; height: 100%; width: 100%; transform: scaleX(0); transform-origin: left center; }
   #close-panel {
     position: absolute; top: 26px; right: 26px; background: none;
@@ -155,7 +220,7 @@
     border-radius: 50%; cursor: pointer; font-size: 13px;
     transition: border-color 0.2s, transform 0.2s;
   }
-  #close-panel:hover { border-color: var(--accent); color: var(--accent); transform: rotate(90deg); }
+  #close-panel:hover { border-color: var(--accent); color: var(--accent); }  /* rotate → Motion (único dueño del transform) */
 
   /* ---- Leyenda ---- */
   #legend {
@@ -204,6 +269,77 @@
   #play-btn:focus-visible, #close-panel:focus-visible,
   input[type="range"]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
+  /* =========================================================================
+     RESPONSIVE — móvil / tablet / desktop / desktop+
+     SOLO geometría (posición, tamaño, layout). CERO cambios a tokens, paleta,
+     glassmorphism o backdrop-filter (Regla 1: preservación estética absoluta).
+     ========================================================================= */
+
+  /* ---- MÓVIL (≤640px) ---- */
+  @media (max-width: 640px) {
+    /* Header: el título largo y el indicador de fase desbordaban a este ancho */
+    header { top: 10px; left: 10px; right: 10px; height: 50px; padding: 0 14px; }
+    header h1 { font-size: 12px; letter-spacing: 0.12em; }
+    header h1 span { display: none; }
+    #phase-indicator { font-size: 8.5px; letter-spacing: 0.10em; gap: 6px; }
+
+    /* Leyenda: del borde inferior-izq (colisiona con el timeline centrado) a una
+       tira horizontal bajo el header ⇒ sin solape, conservando la clave de color */
+    #legend {
+      top: 70px; left: 8px; right: 8px; bottom: auto;
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px 14px;
+      justify-content: center; padding: 8px 12px; line-height: 1.2; font-size: 9px;
+    }
+
+    /* Timeline: barra inferior a todo el ancho (sin centrado por transform) */
+    #timeline { left: 10px; right: 10px; bottom: 12px; width: auto; transform: none;
+      padding: 10px 14px 9px; border-radius: 14px; }
+    #timeline label { display: none; }            /* libera ancho para el slider */
+    #date-readout { min-width: 0; font-size: 10px; }
+
+    /* Detail panel ⇒ BOTTOM SHEET (el eje translateY lo aplica applyPanel en JS).
+       max-height: 82vh ⇒ la franja superior del mapa sigue visible y paneable. */
+    #detail-panel {
+      top: auto; left: 0; right: 0; bottom: 0;
+      width: 100%; max-height: 82vh;
+      border-left: none; border-top: 3px solid var(--accent);
+      border-radius: 18px 18px 0 0;
+      box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.5);
+      padding: 30px 20px max(22px, env(safe-area-inset-bottom, 22px));
+    }
+    /* Asa de arrastre (afordancia de sheet) — usa el token --line, sin color nuevo */
+    #detail-panel::before {
+      content: ""; position: absolute; top: 9px; left: 50%; transform: translateX(-50%);
+      width: 42px; height: 4px; border-radius: 2px; background: var(--line);
+    }
+    #close-panel { top: 14px; right: 16px; }
+  }
+
+  /* ---- TABLET (641–1024px) ---- */
+  @media (min-width: 641px) and (max-width: 1024px) {
+    #detail-panel { width: min(400px, 64vw); }
+    #timeline { width: min(680px, 80vw); }
+  }
+
+  /* ---- DESKTOP+ (≥1600px): respira algo más en pantallas grandes ---- */
+  @media (min-width: 1600px) {
+    #timeline { width: min(820px, 64vw); }
+    #detail-panel { width: 420px; padding: 88px 36px 36px; }
+  }
+
+  /* ---- Punteros gruesos (táctil): blancos de toque más grandes ---- */
+  @media (pointer: coarse) {
+    input[type="range"] { height: 4px; }
+    input[type="range"]::-webkit-slider-thumb { width: 20px; height: 20px; }
+    #play-btn { width: 36px; height: 36px; }
+  }
+
+  /* ---- prefers-reduced-motion: detiene las animaciones decorativas infinitas
+     (las micro-interacciones Motion ya se neutralizan en JS) ---- */
+  @media (prefers-reduced-motion: reduce) {
+    .scan-line, #phase-indicator::before, #loader .bar i, #play-btn.coach { animation: none !important; }
+  }
+
 </style>
 </head>
 <body>
@@ -225,11 +361,16 @@
 </header>
 
 <div id="timeline">
+  <div id="play-coach" aria-hidden="true">INICIAR SECUENCIA</div>
   <div class="row">
     <button id="play-btn" title="Reproducir línea de tiempo">▶</button>
     <label>Timeline</label>
     <input type="range" id="time-slider" min="0" max="1215" value="0" step="1" />
     <div id="date-readout">—</div>
+    <button id="showall-btn" type="button" aria-pressed="false" title="Mostrar todos los incidentes (anula la ventana de 40 días)">
+      <svg class="sa-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.4 4 5.5 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.5-4-9s1.4-6.6 4-9Z"/></svg>
+      <span class="sa-tx">VISTA GLOBAL</span>
+    </button>
   </div>
 </div>
 
@@ -249,14 +390,19 @@
   <div class="dp-date" id="dp-date">—</div>
   <div class="dp-section"><div class="dp-label">Ubicación</div><div class="dp-value" id="dp-loc">—</div></div>
   <div class="dp-section"><div class="dp-label">Servicio / Causa</div><div class="dp-value" id="dp-serv">—</div></div>
-  <div class="dp-section"><div class="dp-label">Respuesta</div><div class="dp-value" id="dp-resp">—</div></div>
-  <div class="dp-section"><div class="dp-label">Categorías de afectación</div><div id="dp-metrics"></div></div>
+  <div class="dp-section"><div class="dp-label">Parámetros de respuesta</div><div id="dp-facts" class="bento"></div></div>
+  <div class="dp-section"><div class="dp-label">Categorías de afectación</div><div id="dp-metrics" class="bento"></div></div>
 </div>
 
 <div id="loader"><div>Procesando 20K registros</div><div class="bar"><i></i></div></div>
 
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<!-- Motion (vanilla / WAAPI) — vendorizado localmente desde motion@12.40.0
+     (node_modules/motion/dist/motion.js -> docs/vendor/motion.js). Se carga como
+     etiqueta script clasica (UMD) => window.Motion, igual que maplibregl y THREE:
+     sin bundler, sin import-map y SIN dependencia CDN nueva en runtime (version fijada). -->
+<script src="vendor/motion.js"></script>
 <script>
 /* =====================================================================
    MAPA INTERACTIVO 3D — INCIDENTES UAECOB
@@ -452,6 +598,7 @@ const VERT_BUILDING = `
   uniform float uDay;
   uniform vec3 uLens;
   uniform float uReveal;
+  uniform float u_showAll;     // VISTA GLOBAL: 0 = ventana de 40 d; 1 = dataset completo (lerp en render())
   varying vec3 vColor;
   varying float vAlpha;
   varying vec3 vObj;
@@ -474,7 +621,8 @@ const VERT_BUILDING = `
     // en vista macro (edificio vivo fuera de la lente ⇒ vAlpha→0 ⇒ descartado). El colapso
     // no restaura el early-Z; su ganancia es evitar la rasterización/fragmentos de los no-vivos.
     float dt = uDay - iDay;
-    float alive = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // dt ∈ (0, 40): muere EXACTO al día 40
+    float windowed = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // ventana rodante dt ∈ (0, 40)
+    float alive = max(windowed, u_showAll);  // VISTA GLOBAL: u_showAll→1 revela todo el histórico (la geometría crece desde 0 ⇒ los fragmentos rampan suave, sin pico)
     vec3 p = position * iDim * alive;   // volumen w×h×d (o un punto degenerado si no vive)
     vObj = p;
     vec3 world = p + iOffset;
@@ -556,6 +704,7 @@ const VERT_HALO = `
   uniform float uDay;
   uniform vec3 uLens;
   uniform float uReveal;
+  uniform float u_showAll;     // VISTA GLOBAL (idéntico al edificio)
   varying vec2 vUv;
   varying vec3 vColor;
   varying float vAlpha;
@@ -581,7 +730,8 @@ const VERT_HALO = `
     // alive=0 ⇒ radio 0 ⇒ los 4 vértices del quad caen en iOffset ⇒ quad degenerado
     // ⇒ culled antes de rasterizar (cero fragmentos de barrido/pulso para obsoletos).
     float dt = uDay - iDay;
-    float alive = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // dt ∈ (0, 40): muere exacto al día 40
+    float windowed = (1.0 - step(dt, 0.0)) * (1.0 - step(${CONFIG.lifespanDays.toFixed(1)}, dt));  // ventana rodante dt ∈ (0, 40)
+    float alive = max(windowed, u_showAll);  // VISTA GLOBAL: revela todo el histórico
     float radius = iRadius * (0.94 + 0.10 * breathe) * alive;
     vec3 p = position * radius;                 // disco de 'radius' m (o punto degenerado si no vive)
     vec3 world = p + iOffset; world.y = 0.6;
@@ -705,12 +855,15 @@ function buildLayer3D() {
   const scene = new THREE.Scene();
   let renderer = null;
   const clock = new THREE.Clock();
+  let lastT = 0;                          // último timestamp (dt para la rampa de VISTA GLOBAL en render())
 
   const uniforms = {
     uTime: { value: 0 },
     uDay: { value: 0 },                 // arranca en el día 0 (lienzo limpio); applyDay() lo gobierna
     uLens: { value: new THREE.Vector3(1e9, 1e9, 0) },
     uReveal: { value: 0 },
+    u_showAll: { value: 0 },            // VISTA GLOBAL: valor animado que leen los shaders (0↔1)
+    u_showAllTarget: { value: 0 },      // destino 0/1; render() interpola u_showAll → target (sin rAF extra)
   };
 
   // Edificios instanciados (un solo draw call): caja unidad con base en y=0.
@@ -884,10 +1037,13 @@ function buildLayer3D() {
     const lx = uniforms.uLens.value.x, lz = uniforms.uLens.value.y, lr = uniforms.uLens.value.z;
     const revealed = uniforms.uReveal.value >= 0.5;
     let best = -1, bestT = Infinity;
+    const showingAll = uniforms.u_showAllTarget.value > 0.5;   // VISTA GLOBAL ⇒ todo lo renderizado es seleccionable
     for (let i = 0; i < incidents.length; i++) {
       const inc = incidents[i];
-      if (inc.day >= uDay) continue;                        // aún no aparecido (dt≤0) ⇒ no seleccionable
-      if (uDay - inc.day >= CONFIG.lifespanDays) continue;  // obsoleto (≥40 d) ⇒ ya no se renderiza
+      if (!showingAll) {
+        if (inc.day >= uDay) continue;                        // aún no aparecido (dt≤0) ⇒ no seleccionable
+        if (uDay - inc.day >= CONFIG.lifespanDays) continue;  // obsoleto (≥40 d) ⇒ ya no se renderiza
+      }
       if (!revealed) {                                      // en macro solo lo visible bajo la lente
         const dx = inc._x - lx, dz = inc._z - lz;
         if (dx * dx + dz * dz > lr * lr) continue;
@@ -913,7 +1069,17 @@ function buildLayer3D() {
       renderer.autoClear = false;
     },
     render(gl, matrix) {
-      uniforms.uTime.value = clock.getElapsedTime();
+      const tNow = clock.getElapsedTime();
+      const dt = Math.min(0.05, tNow - lastT); lastT = tNow;   // dt acotado (re-foco de pestaña)
+      uniforms.uTime.value = tNow;
+      // Rampa suave de VISTA GLOBAL dentro del loop YA existente (cero rAF nuevo):
+      // exp-smoothing dt-based de u_showAll → su target. La geometría fuera de ventana
+      // crece desde 0 ⇒ la carga de fragmentos sube gradual (sin pico de un frame).
+      const _sa = uniforms.u_showAll, _tgt = uniforms.u_showAllTarget.value;
+      if (_sa.value !== _tgt) {
+        _sa.value += (_tgt - _sa.value) * (1 - Math.exp(-dt / 0.22));
+        if (Math.abs(_tgt - _sa.value) < 0.001) _sa.value = _tgt;
+      }
       // matriz: proyección MapLibre → traslación/escala del origen Mercator
       const m = new THREE.Matrix4().fromArray(matrix);
       const l = new THREE.Matrix4()
@@ -936,7 +1102,89 @@ const phaseEl = document.getElementById("phase-indicator");
 const fmtDate = d => new Date(CONFIG.epoch + d * 86400000)
   .toLocaleDateString("es-CO", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 
-function setPhase(txt) { phaseEl.textContent = txt; }
+/* ---------------------------------------------------------------
+   4f. CAPA DE MICRO-INTERACCIONES — Motion (vanilla) + responsive
+   -----------------------------------------------------------------
+   DECISIÓN DE ARQUITECTURA (documentada según la directriz crítica):
+   Se usa la versión VANILLA de Motion (UMD global window.Motion), NO un nodo
+   React + Framer Motion. Razones, atadas a las dos reglas inquebrantables:
+     · 60 FPS del mapa — animate()/hover()/press() de Motion vanilla compilan a la
+       Web Animations API (WAAPI) ⇒ corren en el hilo del COMPOSITOR, fuera del
+       main-thread. NO instalan un rAF permanente nuevo (la regla dura de design.md)
+       ni compiten con el render loop always-on del custom layer (≈16K instancias) ni
+       con el motion-blur full-screen. Framer-Motion-React montaría un reconciliador
+       y su propio scheduler rAF en el main-thread ⇒ contención directa. Se descarta.
+     · Eventos MapLibre / táctil — no se monta ninguna capa React sobre el canvas.
+       Los decorativos siguen con pointer-events:none; los controles capturan solo su
+       caja; el bottom-sheet móvil está acotado en altura y su pointer-events lo
+       gobierna el muelle ⇒ el mapa permanece paneable bajo el dedo.
+   La física tuneada existente (muelle del panel, inercia, motion-blur, tilt, count-up)
+   se PRESERVA intacta. Cero cambios a tokens/paleta/glass (Regla 1).
+   --------------------------------------------------------------- */
+const M = window.Motion || null;
+const reduceMQ = window.matchMedia("(prefers-reduced-motion: reduce)");
+const reduced = () => reduceMQ.matches;
+
+// Breakpoints REACTIVOS (media queries dinámicos vía matchMedia, no solo CSS):
+// applyPanel() y las variants de entrada leen BP para decidir el eje de movimiento.
+const BP = { mobile: false, tablet: false, wide: false };
+const mqMobile = window.matchMedia("(max-width: 640px)");
+const mqTablet = window.matchMedia("(min-width: 641px) and (max-width: 1024px)");
+const mqWide   = window.matchMedia("(min-width: 1600px)");
+function syncBP() { BP.mobile = mqMobile.matches; BP.tablet = mqTablet.matches; BP.wide = mqWide.matches; }
+syncBP();   // antes del primer applyPanel(0) ⇒ el panel arranca en el eje correcto
+// Cruzar un breakpoint con el panel abierto ⇒ re-pintarlo en el eje nuevo
+// (lateral⇄inferior) y recachear los centros del tilt (el layout cambió).
+[mqMobile, mqTablet, mqWide].forEach(mq => mq.addEventListener("change", () => {
+  syncBP();
+  applyPanel(spring.value);
+  cacheTiltRects();
+}));
+
+// ---- Tacto/hover de botones — un único dueño del transform (mini máquina hover/press).
+// El CSS conserva color/borde en :hover; el TRANSFORM (scale/rotate) lo lleva Motion.
+function tactile(el, { hoverScale = 1, hoverRotate = 0, pressScale = 0.9 } = {}) {
+  if (!M || !el) return;
+  const SPR = { type: "spring", stiffness: 480, damping: 24 };
+  let isHover = false, isPress = false;
+  const render = () => {
+    if (reduced()) { M.animate(el, { scale: 1, rotate: 0 }, { duration: 0 }); return; }
+    const scale  = isPress ? pressScale : (isHover ? hoverScale : 1);
+    const rotate = (isHover && !isPress) ? hoverRotate : 0;
+    M.animate(el, { scale, rotate }, SPR);
+  };
+  M.hover(el, () => { isHover = true; render(); return () => { isHover = false; render(); }; });
+  M.press(el, () => { isPress = true; render(); return () => { isPress = false; render(); }; });
+}
+tactile(document.getElementById("play-btn"),    { hoverScale: 1.08, pressScale: 0.88 });
+tactile(document.getElementById("close-panel"), { hoverScale: 1.06, hoverRotate: 90, pressScale: 0.88 });
+
+// ---- Coreografía de entrada (WAAPI, una sola vez al arrancar) ----
+// transform/opacity ⇒ compositor. <header> y #timeline NO son data-tilt (sus hijos sí):
+//   · header: opacity + y (su transform está libre).
+//   · #timeline: se centra con translateX(-50%) en desktop ⇒ NO se toca su transform;
+//     se anima su opacidad y se desliza su contenido (.row).
+//   · #legend es data-tilt (el tilt posee su transform) ⇒ su opacidad la lleva .visible
+//     (CSS) y aquí solo se hace el stagger de las filas .li (que no son tilt).
+// Keyframes en array [desde,hasta] ⇒ el primer valor se fija en el 1er frame (sin flash),
+// y bajo prefers-reduced-motion las duraciones colapsan a 0 (commit instantáneo).
+function runEntrance() {
+  if (!M) return;
+  const r = reduced(), E = [0.16, 1, 0.3, 1];
+  M.animate("header", { opacity: [0, 1], y: [-16, 0] }, { duration: r ? 0 : 0.7, ease: E });
+  M.animate("#timeline", { opacity: [0, 1] }, { duration: r ? 0 : 0.6, ease: E });
+  M.animate("#timeline .row", { y: [18, 0] }, { duration: r ? 0 : 0.6, delay: r ? 0 : 0.06, ease: E });
+  M.animate("#legend .li", { opacity: [0, 1], x: [-10, 0] },
+    { duration: r ? 0 : 0.5, delay: r ? 0 : M.stagger(0.06, { startDelay: 0.22 }), ease: E });
+  if (!r) setTimeout(cacheTiltRects, 950);   // recachear centros del tilt ya asentado el layout
+}
+
+function setPhase(txt) {
+  if (txt === phaseEl.textContent) return;   // gate: mousemove llama mucho ⇒ solo en cambios reales
+  phaseEl.textContent = txt;
+  // Relevo sutil del texto — SOLO opacidad: el transform de #phase-indicator lo posee el tilt.
+  if (M && !reduced()) M.animate(phaseEl, { opacity: [0.4, 1] }, { duration: 0.3, ease: "easeOut" });
+}
 
 // Píxel del evento (CSS px del contenedor) → coordenadas NDC [-1, 1] para el raycast
 function ndc(point) {
@@ -989,7 +1237,7 @@ map.on("click", e => {
   // essential:true ⇒ la animación corre aun con "prefers-reduced-motion" activo
   // (de lo contrario MapLibre salta al destino sin transición).
   // offset desplaza el encuadre a la izquierda para no ocultar el edificio tras la tarjeta.
-  map.flyTo({
+  beginFlight({   // Ghost UI: la cromática ambiente recede mientras la cámara vuela al edificio
     center: [inc.lon, inc.lat], zoom: 17.2, pitch: 62, bearing: -28,
     duration: 2200, essential: true, offset: [-190, 20],
     easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2, // cubic in-out
@@ -999,16 +1247,16 @@ map.on("click", e => {
   document.getElementById("dp-date").textContent = `${inc.fechaTxt} · ${inc.hora}`;
   document.getElementById("dp-loc").textContent = `${inc.barrio} — UPZ ${inc.upz}, ${inc.localidad} (Estrato ${inc.estrato})`;
   document.getElementById("dp-serv").textContent = `${inc.clase || "—"} · Causa: ${inc.causa}`;
-  document.getElementById("dp-resp").textContent = `Estación ${inc.estacion} · T. respuesta ${inc.tresp} · Servicio Nº ${inc.num}`;
-  const M = [
+  setupFacts(inc);   // bento de parámetros (T. respuesta, coordenadas, gravedad, estación…)
+  setupMetrics([     // bento de afectación (count-up + barras por categoría)
     ["SIN SIGNOS", inc.sinSignos, "var(--c-sinsignos)"],
     ["HERIDOS", inc.heridos, "var(--c-heridos)"],
     ["RESCATADOS", inc.rescatados, "var(--c-rescatados)"],
     ["AFECTADOS", inc.afectados, "var(--c-afectados)"],
     ["EXPUESTOS", inc.expuestos, "var(--c-expuestos)"],
-  ];
-  setupMetrics(M);   // inyecta, resetea a 0 y difiere el reveal animado (count-up + barras + cascada)
+  ]);
   openPanel();       // muelle físico: montaje del panel con desaceleración natural
+  revealBento();     // stagger Motion (spring de baja fricción) + arranque del count-up
 });
 
 function closeDetail(recenter = true) {
@@ -1021,7 +1269,7 @@ function closeDetail(recenter = true) {
   // (botón ✕ / Esc / clic en vacío, que llaman closeDetail() ⇒ recenter=true). Los cierres
   // por fin-de-vida al mover el timeline pasan recenter=false ⇒ no secuestran la cámara.
   if (recenter) {
-    map.flyTo({
+    beginFlight({   // Ghost UI también en el regreso a la vista macro
       center: CONFIG.center, zoom: 12.5, pitch: 30, bearing: 0,
       duration: 1600, essential: true,
       easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
@@ -1048,6 +1296,7 @@ const readout = document.getElementById("date-readout");
 const SLIDER_MAX = CONFIG.totalDays * CONFIG.timeScale;
 slider.max = SLIDER_MAX;
 slider.value = 0;                           // arranca en el día 0 (1-ene): lienzo limpio, sin incidentes prematuros
+let showAll = false;            // VISTA GLOBAL activo (lo gobierna setShowAll)
 function applyDay() {
   const d = (+slider.value) / CONFIG.timeScale;   // valor del slider → día real
   if (layer3D) layer3D.uniforms.uDay.value = d;
@@ -1056,28 +1305,125 @@ function applyDay() {
   // Heatmap macro: misma ventana de vida que la GPU ⇒ día ∈ (d − LIFESPAN, d)
   // (estricta en ambos bordes: aparece tras su día ⇒ vacío en d=0; muere al cumplir 40 días).
   if (map.getLayer("heat"))
-    map.setFilter("heat", ["all", ["<", ["get", "day"], d], [">", ["get", "day"], d - CONFIG.lifespanDays]]);
+    map.setFilter("heat", showAll
+      ? null                                                  // VISTA GLOBAL: heatmap sin ventana (todos los puntos históricos)
+      : ["all", ["<", ["get", "day"], d], [">", ["get", "day"], d - CONFIG.lifespanDays]]);
   // Si el incidente seleccionado sale de su ventana de vida al mover el tiempo, ciérralo —
   // SIN recolocar la cámara: no es una acción del usuario, evita un flyTo intempestivo al
   // scrubear/reproducir. (Esto también retira sus efectos fuego/humo/glow vía clearSelectionFX.)
-  if (selected >= 0) {
+  if (!showAll && selected >= 0) {                            // en VISTA GLOBAL nada "expira" ⇒ no se autocierra la tarjeta
     const age = d - incidents[selected].day;
     if (age <= 0 || age >= CONFIG.lifespanDays) closeDetail(false);
   }
 }
 slider.addEventListener("input", applyDay);
 
+/* ---------------------------------------------------------------
+   4a-bis. GHOST UI (Transparencia Cinemática)
+   La cromática AMBIENTE (header + leyenda) se vuelve translúcida durante CUALQUIER
+   vuelo programático de cámara (Play panorámico, selección y regreso a macro) y
+   recupera opacidad al asentarse la cámara (moveend). Quedan EXCLUIDAS a propósito:
+   la Intel Card (tiene su muelle y es el foco) y la #timeline (control activo de la
+   reproducción ⇒ nunca se bloquea ni se atenúa, así no hay lockout). Coste: opacity
+   (compositor) en 2 nodos + un blur declarativo de una sola pasada; el "desenfoque
+   extra" lo refuerza GRATIS el motion-blur de pantalla completa, ya activo en esta
+   misma ventana de flyTo. El token de beginFlight evita parpadeos al encadenar vuelos
+   (selecciones rápidas ⇒ se mantiene atenuada y restaura UNA vez al asentarse).
+   --------------------------------------------------------------- */
+const GHOST = [document.querySelector("header"), document.getElementById("legend")].filter(Boolean);   // timeline excluida: control vivo
+let ghosted = false;
+function setGhostUI(on) {
+  if (on === ghosted) return;
+  ghosted = on;
+  const r = reduced();
+  GHOST.forEach(el => {
+    el.style.pointerEvents = on ? "none" : "";
+    if (!M || r) { el.style.opacity = on ? "0.18" : ""; el.style.filter = on ? "blur(2.5px)" : ""; return; }
+    const a = M.animate(el,
+      { opacity: on ? 0.18 : 1, filter: on ? "blur(2.5px)" : "blur(0px)" },
+      { duration: on ? 0.45 : 0.7, ease: [0.16, 1, 0.3, 1] });
+    if (!on) a?.finished?.then(() => { el.style.filter = ""; }).catch(() => {});
+  });
+}
+// flyTo cinemático: engancha la Ghost UI y la suelta en el moveend de ESTE vuelo. El
+// token anti-solape evita que un handler obsoleto (vuelo interrumpido o encadenado)
+// apague la translucidez del vuelo vigente.
+let flightToken = 0;
+function beginFlight(opts) {
+  setGhostUI(true);
+  const myToken = ++flightToken;
+  map.flyTo(opts);
+  map.once("moveend", () => { if (myToken === flightToken) setGhostUI(false); });
+}
+// Vuelo panorámico de inicio (al dar Play): elevación + órbita suave sobre la vista
+// actual (zoom acotado ⇒ siempre lee "panorámico"); el motion-blur lo acompaña gratis.
+function cinematicSweep() {
+  if (!map || reduced() || selected >= 0) return;   // a11y / no secuestrar una tarjeta abierta
+  beginFlight({
+    center: map.getCenter(),
+    zoom: Math.min(map.getZoom(), 13.2),
+    pitch: 56, bearing: map.getBearing() - 28,
+    duration: 3200, essential: true,
+    easing: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  });
+}
+
 let playTimer = null;
 document.getElementById("play-btn").addEventListener("click", function () {
+  dismissCoach();   // primer uso del Play ⇒ descarta el onboarding permanentemente
   if (playTimer) { clearInterval(playTimer); playTimer = null; this.textContent = "▶"; return; }
   if (+slider.value >= SLIDER_MAX) slider.value = 0;
   this.textContent = "❚❚";
+  cinematicSweep();   // Transparencia Cinemática: la UI se difumina durante el recorrido
   playTimer = setInterval(() => {
     slider.value = +slider.value + 1;
     applyDay();
     if (+slider.value >= SLIDER_MAX) { clearInterval(playTimer); playTimer = null; document.getElementById("play-btn").textContent = "▶"; }
   }, 35);
 });
+
+/* ---------------------------------------------------------------
+   4g. VISTA GLOBAL (override del ciclo de vida de 40 días) + Onboarding del Play
+   Anula la ventana rodante en la GPU vía un único uniform (u_showAll) que render()
+   interpola 0↔1 (rampa suave, sin rAF nuevo). NO se itera el dataset en JS: el VS ya
+   procesa las 20K instancias cada frame; "mostrar todo" sólo cambia cuántas rasterizan
+   (la geometría fuera de ventana crece desde 0 ⇒ overdraw gradual, sin congelar la pestaña).
+   --------------------------------------------------------------- */
+const showallBtn = document.getElementById("showall-btn");
+function setShowAll(on) {
+  showAll = on;
+  if (layer3D) {
+    layer3D.uniforms.u_showAllTarget.value = on ? 1 : 0;
+    if (reduced()) layer3D.uniforms.u_showAll.value = on ? 1 : 0;   // a11y: sin rampa, salto directo
+  }
+  if (showallBtn) showallBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  applyDay();          // re-aplica el heatmap acorde al modo (sin ventana si on)
+  dismissCoach();      // usar cualquier control descarta el onboarding
+}
+if (showallBtn) showallBtn.addEventListener("click", () => setShowAll(!showAll));
+
+/* ---- Onboarding del Play: tooltip flotante + anillo pulsante; descarte PERMANENTE al 1er uso ---- */
+let coachDone = false;
+const playCoach = document.getElementById("play-coach");
+const playBtnEl = document.getElementById("play-btn");
+function showCoach() {
+  if (coachDone || !playCoach) return;
+  playBtnEl.classList.add("coach");                                // anillo (CSS; reduced-motion lo apaga)
+  if (M && !reduced()) M.animate(playCoach, { opacity: [0, 1], y: [6, 0] }, { duration: 0.5, ease: [0.16, 1, 0.3, 1] });
+  else playCoach.style.opacity = "1";
+}
+function dismissCoach() {
+  if (coachDone) return;
+  coachDone = true;
+  if (playBtnEl) playBtnEl.classList.remove("coach");
+  if (!playCoach) return;
+  if (M && !reduced()) {
+    const a = M.animate(playCoach, { opacity: [1, 0], y: [0, 4] }, { duration: 0.3, ease: "easeIn" });
+    (a && a.finished ? a.finished : Promise.resolve()).then(() => playCoach.remove()).catch(() => playCoach.remove());
+  } else { playCoach.remove(); }
+}
+slider.addEventListener("input", dismissCoach);                    // idempotente (Play/VISTA GLOBAL/mapa también lo invocan)
+map.getCanvasContainer().addEventListener("pointerdown", dismissCoach);
 
 /* ---------------------------------------------------------------
    4b. CINEMÁTICA: motion-blur por velocidad de cámara + muelles UI
@@ -1222,7 +1568,15 @@ const spring = {
   d: 24,     // fricción (crítico≈2√k≈28.6 ⇒ 24 = leve rebote "premium")
 };
 function applyPanel(v) {
-  panelEl.style.transform = `translateX(${(1 - v) * 100}%) scale(${0.985 + 0.015 * v})`;
+  // VARIANT RESPONSIVE (mismo muelle k/d): el eje de entrada depende del breakpoint.
+  //   · móvil  ⇒ bottom-sheet que sube desde abajo (translateY 100%→0, sin scale).
+  //   · tablet/desktop ⇒ entrada lateral con sutil fade & scale (comportamiento previo).
+  // Se usa 'v' sin clampear en el transform para conservar el micro-sobreimpulso del muelle.
+  if (BP.mobile) {
+    panelEl.style.transform = `translateY(${(1 - v) * 100}%)`;
+  } else {
+    panelEl.style.transform = `translateX(${(1 - v) * 100}%) scale(${0.985 + 0.015 * v})`;
+  }
   panelEl.style.opacity = Math.max(0, Math.min(1, v * 1.4));
   panelEl.style.pointerEvents = v > 0.02 ? "auto" : "none";
 }
@@ -1241,9 +1595,11 @@ function springStep() {
 }
 function openPanel()  {
   panelEl.style.willChange = "transform, opacity";                 // capa de composición transitoria
+  if (reduced()) { spring.value = spring.target = 1; spring.v = 0; applyPanel(1); return; }  // a11y: salto directo
   spring.target = 1; if (!spring.raf) spring.raf = requestAnimationFrame(springStep);
 }
 function closePanel() {
+  if (reduced()) { spring.value = spring.target = 0; spring.v = 0; applyPanel(0); panelEl.style.willChange = "auto"; return; }
   spring.target = 0; if (!spring.raf) spring.raf = requestAnimationFrame(springStep);
 }
 applyPanel(0);   // estado inicial coherente (panel cerrado)
@@ -1265,40 +1621,93 @@ function cancelMetrics() {
   metricItems.forEach(it => { if (it.bar) it.bar.style.willChange = "auto"; });
   metricItems = [];
 }
-function setupMetrics(M) {
-  cancelMetrics();
-  const maxFila = Math.max(1, ...M.map(m => m[1]));               // normalización intra-tarjeta
-  metricsEl.innerHTML = M.map(([n, v, cc], i) => {
-    const scaleFinal = v > 0 ? Math.max(0.06, v / maxFila) : 0;   // piso 0.06: un 1 entre 12 sigue visible
-    return `<div class="dp-metric" style="--i:${i}" data-target="${v}" data-scale="${scaleFinal.toFixed(3)}">` +
-      `<span class="dot" style="background:${cc};opacity:${v > 0 ? 1 : 0.18}"></span>` +
-      `<span class="name" style="opacity:${v > 0 ? 1 : 0.35}">${n}</span>` +
-      `<span class="count" style="opacity:${v > 0 ? 1 : 0.25}">0</span>` +
-      `<div class="dp-bar"><i class="dp-bar-fill" style="background:${cc}"></i></div></div>`;
+/* Iconografía mínima (SVG line, currentColor) — textura "OS", sin recargar la tarjeta. */
+const _ic = (p) => `<svg class="bc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const ICON = {
+  clock: _ic('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  alert: _ic('<path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>'),
+  pin:   _ic('<path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10Z"/><circle cx="12" cy="11" r="2"/>'),
+  house: _ic('<path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/>'),
+  layers:_ic('<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>'),
+  hash:  _ic('<path d="M5 9h14M5 15h14M10 4 8 20M16 4l-2 16"/>'),
+};
+const factsEl = document.getElementById("dp-facts");
+// "Gravedad": nivel derivado de forma transparente de las víctimas visibles en la misma tarjeta.
+function severity(inc) {
+  if (inc.sinSignos > 0)  return ["CRÍTICA",  "var(--c-sinsignos)"];
+  if (inc.heridos    > 0) return ["ALTA",     "var(--c-heridos)"];
+  if (inc.rescatados > 0) return ["MEDIA",    "var(--c-rescatados)"];
+  if (inc.afectados  > 0) return ["MODERADA", "var(--c-afectados)"];
+  return ["BAJA", "var(--c-expuestos)"];
+}
+function setupFacts(inc) {
+  const [sevTxt, sevC] = severity(inc);
+  const facts = [
+    { l: "T. RESPUESTA", v: inc.tresp,   ic: ICON.clock },
+    { l: "GRAVEDAD",     v: sevTxt, mc: sevC, accent: true, ic: ICON.alert },
+    { l: "COORDENADAS",  v: `${(+inc.lat).toFixed(5)}°, ${(+inc.lon).toFixed(5)}°`, mono: true, span2: true, ic: ICON.pin },
+    { l: "ESTACIÓN",     v: inc.estacion, ic: ICON.house },
+    { l: "ESTRATO",      v: inc.estrato,  ic: ICON.layers },
+    { l: "SERVICIO Nº",  v: inc.num, mono: true, span2: true, ic: ICON.hash },
+  ];
+  factsEl.innerHTML = facts.map((f, i) => {
+    const cls = "bento-card fact" + (f.span2 ? " span2" : "");
+    const vcls = "bc-value" + (f.mono ? " mono" : "") + (f.accent ? " accent" : "");
+    return `<div class="${cls}" style="--i:${i}${f.mc ? `;--mc:${f.mc}` : ""}">`
+      + `<div class="bc-head"><span class="bc-label">${f.l}</span>${f.ic || ""}</div>`
+      + `<span class="${vcls}">${f.v}</span></div>`;
   }).join("");
-  metricItems = Array.from(metricsEl.querySelectorAll(".dp-metric")).map(row => ({
+}
+function setupMetrics(rows) {
+  cancelMetrics();
+  const maxFila = Math.max(1, ...rows.map(m => m[1]));            // normalización intra-tarjeta
+  metricsEl.innerHTML = rows.map(([n, v, cc], i) => {
+    const scaleFinal = v > 0 ? Math.max(0.06, v / maxFila) : 0;   // piso 0.06: un 1 entre 12 sigue visible
+    return `<div class="bento-card metric${v > 0 ? "" : " metric-zero"}" style="--i:${i};--mc:${cc}" data-target="${v}" data-scale="${scaleFinal.toFixed(3)}">`
+      + `<div class="bc-head"><span class="bc-dot" style="background:${cc}"></span><span class="bc-label">${n}</span></div>`
+      + `<span class="bc-value count">0</span>`
+      + `<div class="dp-bar"><i class="dp-bar-fill" style="background:${cc}"></i></div></div>`;
+  }).join("");
+  metricItems = Array.from(metricsEl.querySelectorAll(".metric")).map(row => ({
     row, node: row.querySelector(".count"), bar: row.querySelector(".dp-bar-fill"),
     target: +row.dataset.target, scaleFinal: +row.dataset.scale, t0: 0, dur: 0,
   }));
   metricItems.forEach(it => { it.node.textContent = "0"; it.bar.style.transform = "scaleX(0)"; });
-  // Arranca el reveal en cuanto la tarjeta empieza a abrirse (≈ inicio del muelle):
-  // las animaciones de métricas son ligeras (5 filas: transform/opacity + ≤5 writes/frame)
-  // y deben verse "al momento de expandirse", no diferidas al final del flyTo.
-  setTimeout(startReveal, 200);
 }
-function startReveal() {
-  const t = performance.now();
-  metricItems.forEach((it, i) => {
-    it.row.classList.add("in");                                  // dispara la cascada CSS (stagger por --i)
-    it.t0 = t + i * 55 + 90;                                     // el número aterriza tras su fila y luego cuenta
-    it.dur = Math.min(900, Math.max(420, 420 + it.target * 22)); // números mayores cuentan algo más
-    if (it.bar) it.bar.style.willChange = "transform";
-    if (it.target <= 2) {                                        // n bajos: salto directo (0→2 parpadea feo)
-      it.node.textContent = it.target;
-      it.bar.style.transform = `scaleX(${it.scaleFinal})`;
-    }
-  });
-  if (!metricsRaf) metricsRaf = requestAnimationFrame(stepMetrics);
+/* Reveal de la Intel Card: cascada (stagger) de micro-tarjetas con muelle de baja
+   fricción. Motion compila el spring a una easing linear() para WAAPI ⇒ corre en el
+   COMPOSITOR, sin un 2º rAF que dispute el hilo con el mapa ni con el motion-blur.
+   El stagger reparte la promoción de capas (no promueve 11 capas a la vez tras la
+   escena WebGL); Motion gestiona y libera el will-change por elemento. */
+function revealBento() {
+  const cards = Array.from(panelEl.querySelectorAll(".bento-card"));
+  if (!M || reduced()) {                                          // a11y / sin Motion: commit instantáneo
+    cards.forEach(c => { c.style.opacity = "1"; c.style.transform = "none"; });
+    startCounts(0);
+    return;
+  }
+  cards.forEach(c => { c.style.opacity = "0"; });                 // estado inicial sin flash (mismo tick, sin paint)
+  const anim = M.animate(cards,
+    { opacity: [0, 1], y: [10, 0], scale: [0.94, 1] },
+    { delay: M.stagger(0.045, { startDelay: 0.12 }), type: "spring", stiffness: 340, damping: 20 });
+  anim?.finished?.then(() => cards.forEach(c => { c.style.opacity = "1"; c.style.willChange = "auto"; })).catch(() => {});
+  startCounts(220);                                               // el conteo arranca tras el primer "pop"
+}
+function startCounts(delayMs) {
+  const kick = () => {
+    const t = performance.now();
+    metricItems.forEach((it, i) => {
+      it.t0 = t + i * 55 + 60;                                    // el número aterriza tras su tarjeta y luego cuenta
+      it.dur = Math.min(900, Math.max(420, 420 + it.target * 22)); // números mayores cuentan algo más
+      if (it.bar) it.bar.style.willChange = "transform";
+      if (it.target <= 2) {                                       // n bajos: salto directo (0→2 parpadea feo)
+        it.node.textContent = it.target;
+        it.bar.style.transform = `scaleX(${it.scaleFinal})`;
+      }
+    });
+    if (!metricsRaf) metricsRaf = requestAnimationFrame(stepMetrics);
+  };
+  if (delayMs > 0) setTimeout(kick, delayMs); else kick();
 }
 function stepMetrics(now) {
   let done = true;
@@ -1422,7 +1831,9 @@ Promise.all([loadData(), new Promise(r => map.on("load", r))]).then(([data]) => 
   document.getElementById("legend").classList.add("visible");
   const loader = document.getElementById("loader");
   loader.style.opacity = "0";
+  setTimeout(runEntrance, 120);            // coreografía de entrada (Motion/WAAPI) mientras el loader se disipa
   setTimeout(() => loader.remove(), 800);
+  setTimeout(showCoach, 1150);             // onboarding: dirige la atención al Play tras asentarse la entrada
 });
 </script>
 </body>
